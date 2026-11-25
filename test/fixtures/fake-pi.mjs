@@ -6,8 +6,16 @@
 // Controlled by env:
 //   FAKE_MODE=answer       (default) narration + tool step, then a final answer
 //   FAKE_MODE=big          one huge answer, size from FAKE_SIZE
+//   FAKE_FINAL_PAD         repeat pattern for the big answer (default "X") —
+//                                FAKE_SIZE counts characters of the padded text
 //   FAKE_MODE=hang         never settles, so the test can cancel or time it out
 //   FAKE_MODE=slow         settles after FAKE_DELAY_MS
+//   FAKE_MODE=startup_exit (rpc) exits 127 with stderr before reading a command
+//   FAKE_MODE=exit_unsettled / signal_unsettled (rpc) end after prompt ack with no agent_settled
+//   FAKE_MODE=timeout_before_ack / wrong_prompt_ack (rpc) no valid prompt acknowledgement
+//   FAKE_MODE=snapshot_delay  (rpc) narration + tool step + a provisional snapshot,
+//                                 settles FAKE_DELAY_MS later
+//   FAKE_SNAPSHOT_CHARS    pads the provisional snapshot to test event clipping
 //   FAKE_MODE=empty_final  settles with no text at all
 //   FAKE_MODE=no_stop      final message carries no stopReason
 //   FAKE_MODE=garbage      non-JSON output, i.e. a broken event contract
@@ -39,6 +47,67 @@ let holding = false;
 
 if (process.env.FAKE_STARTED_FILE) {
 	appendFileSync(process.env.FAKE_STARTED_FILE, `${process.pid}\n`);
+}
+
+// FAKE_SURVIVOR_PID_FILE: a descendant in pi's own process group that closes
+// its inherited pipes and ignores SIGTERM. The leader dying says nothing about
+// this one — exactly the case where untracking the tree at leader close would
+// leave it unreachable by the shutdown SIGKILL.
+if (process.env.FAKE_SURVIVOR_PID_FILE) {
+	const pidFile = process.env.FAKE_SURVIVOR_PID_FILE;
+	spawn("sh", ["-c", `echo $$ > '${pidFile}'; trap '' TERM; exec sleep 300 <&- 1>&- 2>&-`], {
+		stdio: "ignore",
+	});
+}
+
+// FAKE_LINGERING_GROUP_FILE: a member of pi's own process group that no signal
+// can remove — a zombie. Signals are no-ops on zombies, so the group cannot be
+// confirmed empty until the holder outside it is killed and the zombie is
+// reaped. The holder leaves the group (setpgid to its own) but stays in pi's
+// session, so its child can join the pi group before exiting; it then never
+// waits, which is what keeps the zombie on the books. Deterministic and
+// test-controlled: kill the holder's pid and the group empties.
+//
+// python3 for setpgid — node has no binding for it, and no shell has a builtin.
+// First run only: the holder's pid file is the marker, so follow-up runs of
+// the same client (which inherit this env) do not each leave their own
+// zombie — the test kills the holder before asking for a follow-up.
+if (process.env.FAKE_LINGERING_GROUP_FILE && !existsSync(process.env.FAKE_LINGERING_GROUP_FILE)) {
+	const pidFile = process.env.FAKE_LINGERING_GROUP_FILE;
+	const holder = spawn(
+		"python3",
+		[
+			"-c",
+			`import os, sys, time
+os.setpgid(0, 0)
+pid = os.fork()
+if pid == 0:
+    os.setpgid(0, ${process.pid})
+    os._exit(0)
+open(${JSON.stringify(pidFile)}, "w").write(str(os.getpid()))
+while True:
+    time.sleep(60)
+`,
+		],
+		{ stdio: "ignore" },
+	);
+	holder.unref();
+	// The zombie must be in place before this process exits, or the group id
+	// is gone and the child's setpgid has nothing to join. The holder signals
+	// readiness by writing the pid file; wait for it, bounded.
+	const deadline = Date.now() + 2000;
+	while (!existsSync(pidFile) && Date.now() < deadline) {
+		await sleep(20);
+	}
+}
+
+/** Exit only once every stdout write has reached the pipe: a hard
+ * process.exit mid-flush truncates the stream, and under concurrent load the
+ * reader can fall behind far enough that a 20ms gamble loses a 400KB line. */
+function exitWhenDrained(code) {
+	process.stdout.write("", () => {
+		setTimeout(() => process.exit(code), 0);
+	});
 }
 
 // `--mode rpc`: pi stays up, reads JSONL commands on stdin, and ends the turn
@@ -155,7 +224,13 @@ async function runScenario() {
 
 	if (mode === "big") {
 		out({ type: "turn_start" });
-		finalMessage("X".repeat(Number(process.env.FAKE_SIZE ?? 200_000)));
+		// FAKE_FINAL_PAD sets the repeated pattern (multibyte/escape-heavy
+		// content for byte-budget tests); FAKE_SIZE stays the character count.
+		const pad = process.env.FAKE_FINAL_PAD ?? "X";
+		finalMessage(pad.repeat(Math.ceil(Number(process.env.FAKE_SIZE ?? 200_000) / pad.length)));
+		// A legal turn settles; the rpc path needs these to call it done.
+		out({ type: "agent_end", willRetry: false });
+		out({ type: "agent_settled" });
 		process.exitCode = exitCode;
 		return;
 	}
@@ -324,6 +399,11 @@ async function runScenario() {
  * need; FAKE_RPC_SETTLE_MS answers after a delay.
  */
 async function runRpc() {
+	if (mode === "startup_exit") {
+		process.stderr.write("fake private startup stderr\n");
+		process.exitCode = 127;
+		return;
+	}
 	out({ type: "session", id: "fake-session", cwd: process.cwd() });
 	out({ type: "agent_start" });
 
@@ -358,10 +438,54 @@ async function runRpc() {
 				continue;
 			}
 			received.push(cmd.type);
-			out({ type: "response", command: cmd.type, success: true });
+			if (mode === "timeout_before_ack") continue;
+			if (mode === "wrong_prompt_ack" && cmd.type === "prompt") {
+				out({ type: "response", command: "prompt", success: true });
+				out({ type: "response", id: `${cmd.id}-foreign`, command: "prompt", success: true });
+				exitWhenDrained(0);
+				return;
+			}
+			out({ type: "response", id: cmd.id, command: cmd.type, success: true });
 
 			if (cmd.type === "prompt") {
-				if (settleMs) {
+				if (mode === "exit_unsettled" || mode === "signal_unsettled") {
+					if (mode === "signal_unsettled") {
+						process.stdout.write("", () => process.kill(process.pid, "SIGTERM"));
+					} else {
+						exitWhenDrained(0);
+					}
+					return;
+				}
+				if (mode === "snapshot_delay") {
+					// Narration and a tool step land first (they must never reach the
+					// projection), then a settled message_end acts as a provisional
+					// answer snapshot, and the turn settles only FAKE_DELAY_MS later —
+					// the window async polling reads progress and a snapshot before
+					// the final.
+					out({ type: "turn_start" });
+					out({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							provider: "fake",
+							model: "fake-1",
+							stopReason: "toolUse",
+							usage: { input: 10, output: 2, cost: { total: 0 } },
+							content: [
+								{ type: "text", text: "SECRET NARRATION: checking the thing." },
+								{ type: "toolCall", id: "c1", name: "read", arguments: { path: "a.txt" } },
+							],
+						},
+					});
+					out({ type: "tool_execution_start", toolName: "read" });
+					out({ type: "tool_execution_end", toolName: "read", isError: false });
+					finalMessage(
+						`PARTIAL SNAPSHOT BEFORE SETTLE${(process.env.FAKE_SNAPSHOT_TEXT ?? "x").repeat(
+							Number(process.env.FAKE_SNAPSHOT_CHARS ?? 0),
+						)}`,
+					);
+					setTimeout(() => settle("FINAL AFTER SNAPSHOT"), Number(process.env.FAKE_DELAY_MS ?? 2000));
+				} else if (settleMs) {
 					out({ type: "turn_start" });
 					setTimeout(() => settle("RPC ANSWER"), Number(settleMs));
 				} else if (process.env.FAKE_RPC_WAIT === "1") {
@@ -376,7 +500,7 @@ async function runRpc() {
 						// deadline — unless it is a scenario whose whole point is to hang. The
 						// delay lets stdout flush.
 						if (holding) return;
-						setTimeout(() => process.exit(exitCode), 20);
+						exitWhenDrained(exitCode);
 					});
 				}
 			} else if (cmd.type === "steer") {
@@ -397,7 +521,7 @@ async function runRpc() {
 	process.stdin.on("end", () => {
 		process.exitCode = exitCode;
 		// Mirrors pi: closing stdin is how rpc mode is asked to exit.
-		setTimeout(() => process.exit(exitCode), 20);
+		exitWhenDrained(exitCode);
 	});
 	// Keep the process alive while it waits for commands.
 	setInterval(() => {}, 1000);

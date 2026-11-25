@@ -5,6 +5,32 @@ What changed in behaviour, in the order it shipped. Dates are publish dates from
 Nothing below 0.4.0 was ever published; the `0.3.0` that lingered in `package-lock.json` was a
 stale lock, not a release.
 
+## Unreleased
+
+- **Opt-in durable async executions.** Behind `PI_MCP_ASYNC_STATE_DIR`, the server gains `pi_start`,
+  `pi_status`, `pi_wait`, `pi_result`, and `pi_cancel`; unset, it exposes the original six tools and
+  behaves identically. A started execution is durably recorded before a model is reached,
+  persists state, bounded progress projections, and the settled final in a private store, and
+  always runs the `rpc` transport. `pi_wait` returns the `pi_status` payload, blocking up to
+  `timeout_ms` (0–20000, default 5000) for terminal state; cancelling the wait does not cancel the
+  execution. On restart, orphans are reconciled as `interrupted` with their partials intact and
+  nothing is ever auto-replayed. Cleanup is verified before a session lane frees: a turn is over
+  only once its whole process group is confirmed empty, and an unconfirmable group fails closed,
+  marks the execution `failed`, and quarantines the session until the group is gone. One
+  supervisor owns a state directory via an exclusive lock; a first store failure fails the whole
+  async subsystem closed (`store_unavailable`) while the synchronous tools keep working.
+- **Lifecycle and startup diagnostics.** A run that dies before settlement is reported with a typed
+  classification — spawn error, abnormal exit, clean exit without `agent_settled` — and a bounded
+  `process_diagnostics` block (spawn error code, exit code or signal, `rpc_prompt_acknowledged`);
+  never raw stderr or RPC payloads. Shutdown holds the async store lock until parked writes are done
+  and every pi process group is confirmed empty, and a mid-run teardown with closed stdio releases
+  the lock without manual removal.
+- **Opt-in completion hook.** `PI_MCP_COMPLETION_HOOK` names an absolute path to an operator-owned
+  executable invoked at most once, best-effort, after a durably committed nonterminal → terminal
+  transition, with exactly two arguments (execution id, terminal state), no shell, an empty
+  environment, and a bounded whole-group reap on timeout. No delivery guarantee, no retry, no replay;
+  the server logs only a bounded one-line status and never reads the wrapper's output.
+
 ## 0.7.1 — 2026-09-08
 
 - Every tool declares MCP `annotations` — `readOnlyHint`, `destructiveHint`, `idempotentHint`,
