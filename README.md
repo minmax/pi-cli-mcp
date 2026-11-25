@@ -403,20 +403,55 @@ SIGKILL of the server itself: only a clean shutdown reaps hooks.
 - A hook failure never delays a tool result, never mutates a record, and can never fail a commit:
 the invocation happens strictly after the state is durable.
 
-Example wrapper (illustrative only — no real destination or credentials; keep the wrapper `0700`
-and its private config `0600`):
+Example: an Apprise wrapper (illustrative only — no real destination or credentials). The adapter
+knows nothing about Apprise, so the wrapper owns every detail. A complete setup is two files,
+plus one dry run to prove where a tag lands.
+
+The private config, `0600`, readable only by the account the server runs under —
+`/usr/local/etc/pi-mcp/apprise.conf`:
+
+```sh
+# Apprise TEXT config. Tag syntax is a PREFIX: tag=url. A trailing ", tag" after the
+# URL attaches nothing, matches no tag, and fails silently — keep the tag before the '='.
+pi-completion=pover://<PushoverToken>@<PushoverUser>/
+# Untagged lines are outside the hook's reach: --tag pi-completion never selects them.
+desktop=macosx
+```
+
+The wrapper, `0700` — `/usr/local/lib/pi-mcp/notify.sh`:
 
 ```sh
 #!/bin/sh
 # /usr/local/lib/pi-mcp/notify.sh — invoked as: notify.sh <execution-id> <state>
-# Runs with an EMPTY environment: every path is baked in, nothing is inherited.
-# Delivers all four terminal states; filter on $2 for a subset.
-CONFIG=/usr/local/etc/pi-mcp/apprise.yml   # 0600, private: Apprise URLs/credentials live here,
-                                          # never in argv and never in the server's environment
-exec /usr/local/bin/apprise --config "$CONFIG" 	--title "pi execution finished: $2" --body "execution $1"
-# exec preserves apprise's exit status: a nonzero exit is logged by the server as one bounded
-# line (the code, never the output), and the delivery is never retried either way.
+# The environment is EMPTY: every path is baked in here, nothing is inherited.
+CONFIG=/usr/local/etc/pi-mcp/apprise.conf   # 0600, private: Apprise URLs/credentials live
+                                            # here — never in argv, never in the server's env
+[ "$#" -eq 2 ] || exit 64                   # the contract is exactly two arguments
+[ "$2" = succeeded ] || [ "$2" = failed ] || [ "$2" = cancelled ] || [ "$2" = interrupted ] || exit 64
+exec /usr/local/bin/apprise --config "$CONFIG" --tag pi-completion \
+    --title "pi execution: $2" --body "execution $1 finished with state $2"
+# All four states are delivered; filter on $2 inside the case above for a subset.
+# exec preserves apprise's exit status: a nonzero exit is logged by the server as one
+# bounded line (the code, never the output), and delivery is never retried either way.
 ```
+
+Prove the destination locally before wiring it in — a dry run sends nothing and prints exactly
+what a tag would reach:
+
+```console
+$ apprise --dry-run --disable-async --tag pi-completion
+… pover://… (tags: pi-completion)
+
+$ apprise --dry-run --disable-async            # no tag: only the untagged lines
+… macosx
+
+$ apprise --dry-run --disable-async --tag all # everything the config can reach
+```
+
+Exactly one destination is the goal: the tagged line above pins the hook to a single recipient,
+and the dry run is how you check it stayed pinned. The argument guards make accidental invocations
+harmless too — the `exit 64` paths run before apprise is ever reached, so a stray call with the
+wrong shape never sends anything.
 
 ## Environment
 

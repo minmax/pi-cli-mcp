@@ -7,6 +7,11 @@ stale lock, not a release.
 
 ## Unreleased
 
+Built for clients that cannot hold a call open or watch a stream — the ChatGPT and Claude mobile
+apps, where the request can close before a long Pi turn ends — so you can start work from a phone,
+walk away, and be told when it is done without polling. All of it is opt-in: nothing changes for an
+operator who sets none of the variables below.
+
 - **Opt-in durable async executions.** Behind `PI_MCP_ASYNC_STATE_DIR`, the server gains `pi_start`,
   `pi_status`, `pi_wait`, `pi_result`, and `pi_cancel`; unset, it exposes the original six tools and
   behaves identically. A started execution is durably recorded before a model is reached,
