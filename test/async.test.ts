@@ -275,6 +275,75 @@ describe("async tools", () => {
 		expect(startedCount(ws)).toBe(cannotSpawn ? 0 : 1);
 	});
 
+	test("a malformed line mid-stream fails closed even though the turn settles", async () => {
+		const ws = track(makeAsyncWorkspace());
+		const client = new Client({
+			...ws.asyncEnv,
+			FAKE_GARBAGE_LINE: "1",
+			FAKE_STARTED_FILE: startedFile(ws),
+		});
+		cleanup.push(() => client.close());
+
+		const start = await client.tool("pi_start", { prompt: "corrupt stream test prompt" });
+		const args = { execution_id: start.structured.execution_id };
+		await waitFor("failed", async () => (await client.tool("pi_status", args)).structured.state === "failed");
+		const result = await client.tool("pi_result", args);
+		expect(result.structured.state).toBe("failed");
+		expect(result.structured.final).toMatchObject({
+			outcome: "failed",
+			failure_reason: "pi emitted 1 malformed line on its protocol stdout; the event stream contract was violated",
+			retries: 0,
+		});
+		// The corrupt line itself is never echoed, in the final or the projection.
+		expect(JSON.stringify(result.structured)).not.toContain("this line is not json");
+		expect(result.text).not.toContain("this line is not json");
+		expect(startedCount(ws)).toBe(1);
+	});
+
+	test("a malformed persisted final is refused on restart, not served by pi_result", async () => {
+		const ws = track(makeAsyncWorkspace());
+		// Supervisor A: complete a job so a terminal final lands on disk.
+		const a = new Client({ ...ws.asyncEnv, FAKE_STARTED_FILE: startedFile(ws) });
+		cleanup.push(() => a.close());
+		const start = await a.tool("pi_start", { prompt: "final validation test" });
+		const exec: string = start.structured.execution_id;
+		await waitFor(
+			"succeeded",
+			async () => (await a.tool("pi_status", { execution_id: exec })).structured.state === "succeeded",
+		);
+		a.child.kill("SIGTERM");
+		await new Promise<void>((resolve) => a.child.on("exit", () => resolve()));
+
+		// A clean restart still serves the valid record, final and all.
+		const b = new Client(ws.asyncEnv);
+		cleanup.push(() => b.close());
+		const good = await b.tool("pi_result", { execution_id: exec });
+		expect(good.structured.state).toBe("succeeded");
+		expect(good.structured.final).toMatchObject({ outcome: "succeeded", answer: { text: "FINAL ANSWER" } });
+		b.child.kill("SIGTERM");
+		await new Promise<void>((resolve) => b.child.on("exit", () => resolve()));
+
+		// Corrupt the final on disk: a numeric answer text and a missing usage block
+		// — shapes the writer never emits.
+		const file = join(ws.stateDir, "executions", `${exec}.json`);
+		const record = JSON.parse(readFileSync(file, "utf8"));
+		record.final.answer = 123;
+		delete record.final.usage;
+		writeFileSync(file, JSON.stringify(record));
+
+		// The store refuses to open on the tampered shape, and the refusal is
+		// typed — never a silently served garbage final. Valid records elsewhere
+		// in the suite prove the reload path itself stays honest.
+		const c = new Client(ws.asyncEnv);
+		cleanup.push(() => c.close());
+		expectErrorCode(await c.tool("pi_result", { execution_id: exec }), "store_unavailable");
+		expectErrorCode(await c.tool("pi_status", { execution_id: exec }), "store_unavailable");
+		expectErrorCode(await c.tool("pi_start", { prompt: "no new work on a poisoned store" }), "store_unavailable");
+		// The synchronous tools are unaffected by an unusable async store.
+		const sync = await c.tool("pi", { prompt: "still works", cwd: ws.dir });
+		expect(sync.isError).toBe(false);
+	});
+
 	test("projections are safe, snapshots are clipped, cursors page without duplicates", async () => {
 		const ws = track(makeAsyncWorkspace());
 		const client = new Client({
@@ -630,6 +699,35 @@ describe("async tools", () => {
 		const third = await client.tool("pi_start", args);
 		expect(third.structured.execution_id).toBe(first.structured.execution_id);
 		expect(third.structured.state).toBe("succeeded");
+	});
+
+	test("a retry after the original cwd is removed still hits the idempotency key", async () => {
+		const ws = track(makeAsyncWorkspace());
+		const client = new Client({ ...ws.asyncEnv, FAKE_STARTED_FILE: startedFile(ws) });
+		cleanup.push(() => client.close());
+
+		const gone = join(ws.dir, "gone-cwd");
+		mkdirSync(gone, { recursive: true });
+		const args = { prompt: "work in a doomed directory", cwd: gone, idempotency_key: "cwd-vanishes" };
+		const first = await client.tool("pi_start", args);
+		const exec: string = first.structured.execution_id;
+		await waitFor("succeeded", async () => {
+			const res = await client.tool("pi_status", { execution_id: exec });
+			return res.structured?.state === "succeeded";
+		});
+		const spawned = startedCount(ws);
+		rmSync(gone, { recursive: true, force: true });
+
+		// An identical retry of the accepted request finds its execution: the cwd
+		// is resolved on a key miss only, so its later removal cannot turn a
+		// retry into invalid_input — and a terminal hit never re-spawns pi.
+		const retry = await client.tool("pi_start", args);
+		expect(retry.structured.execution_id).toBe(exec);
+		expect(retry.structured.state).toBe("succeeded");
+		expect(startedCount(ws)).toBe(spawned);
+
+		// A fresh request for the missing directory is still rejected.
+		expectErrorCode(await client.tool("pi_start", { ...args, idempotency_key: "fresh-cwd-1" }), "invalid_input");
 	});
 
 	test("idempotent retries resolve before the session is known to the adapter", async () => {
@@ -2451,6 +2549,61 @@ describe("async tools", () => {
 			return (res.structured?.events ?? []).length === 0;
 		});
 		expect(hookLines(hookLog)).toEqual([`${exec} succeeded`]);
+	});
+	test("a failed retention commit fails the store closed: typed refusal, no dispatch, nothing uncommitted", async () => {
+		const ws = track(makeAsyncWorkspace());
+		const gate = join(ws.dir, "spawn-gate");
+		const client = new Client({
+			...ws.asyncEnv,
+			// The window elapses a second after finish, so the next lookup is a
+			// real retention mutation — and the injected failure lands on it.
+			PI_MCP_ASYNC_PARTIAL_RETENTION_MS: "1000",
+			PI_MCP_ASYNC_TEST_FAIL_RETENTION: "1",
+			PI_MCP_ASYNC_TEST_SPAWN_GATE: gate,
+			FAKE_STARTED_FILE: startedFile(ws),
+		});
+		cleanup.push(() => rmSync(gate, { force: true }));
+
+		// Job 1 runs through the open gate and settles; job 2 parks at the gate
+		// as a live running execution with no child yet.
+		writeFileSync(gate, "go\n");
+		const first = await client.tool("pi_start", { prompt: "will expire under a failing store" });
+		const exec1: string = first.structured.execution_id;
+		await waitFor("succeeded", async () => {
+			const res = await client.tool("pi_status", { execution_id: exec1 });
+			return res.structured?.state === "succeeded";
+		});
+		expect(startedCount(ws)).toBe(1);
+		rmSync(gate, { force: true });
+		const second = await client.tool("pi_start", { prompt: "live when the store dies", idempotency_key: "live-2" });
+		const exec2: string = second.structured.execution_id;
+		await waitFor("running before spawn", async () => {
+			const res = await client.tool("pi_status", { execution_id: exec2 });
+			return res.structured?.state === "running";
+		});
+		expect(startedCount(ws)).toBe(1);
+
+		// The retention window elapses; the triggering lookup fails closed and
+		// typed — no stale record, and never an expiry result that was never
+		// committed.
+		await sleep(1200);
+		expectErrorCode(await client.tool("pi_result", { execution_id: exec1 }), "store_unavailable");
+		expectErrorCode(await client.tool("pi_status", { execution_id: exec1 }), "store_unavailable");
+
+		// No further dispatch: every entry point refuses, and the live job's
+		// cancelled token means opening the spawn window spawns nothing.
+		expectErrorCode(await client.tool("pi_status", { execution_id: exec2 }), "store_unavailable");
+		expectErrorCode(await client.tool("pi_start", { prompt: "no work on a dead store" }), "store_unavailable");
+		writeFileSync(gate, "go\n");
+		await sleep(400);
+		expect(startedCount(ws)).toBe(1);
+
+		// The refused expiry was never committed: the record on disk still
+		// carries its events and its final, exactly as it settled.
+		const raw = JSON.parse(readFileSync(join(ws.stateDir, "executions", `${exec1}.json`), "utf8"));
+		expect(raw.state).toBe("succeeded");
+		expect(raw.events.length).toBeGreaterThan(0);
+		expect(raw.finals_expired).toBeUndefined();
 	});
 
 	test("a failing hook logs a bounded status, never its output, and blocks nothing", async () => {

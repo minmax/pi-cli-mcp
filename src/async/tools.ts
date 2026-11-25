@@ -8,7 +8,7 @@
 // pending, not an error.
 
 import { ASYNC_PAGE_EVENTS, asyncPageBytes } from "../config.ts";
-import { readOverrides, readPrompt, readTimeout, resolveCwd, toolResult } from "../tools.ts";
+import { readOverrides, readPrompt, readTimeout, toolResult } from "../tools.ts";
 import type { CancelToken, RunOverrides, ThinkingLevel, ToolDefinition, ToolResult } from "../types.ts";
 import { isThinkingLevel, THINKING_LEVELS } from "../types.ts";
 import { accept, cancelExecution, type ExecutionView, statusOf } from "./scheduler.ts";
@@ -408,7 +408,10 @@ async function startExecution(input: Record<string, unknown>, token: CancelToken
 		if (parsed.sessionId !== null && parsed.hasSessionProps) {
 			throw invalid("tools, no_tools and system_prompt_append are only accepted on a new session");
 		}
-		if (parsed.sessionId === null) resolveCwd(parsed.explicitCwd ? parsed.cwd : undefined);
+		// No filesystem checks here: the cwd is resolved by the scheduler on a key
+		// miss, after idempotency dedup — so an identical retry of an already
+		// accepted request still finds its execution even if the directory has
+		// since disappeared.
 	} catch (err) {
 		return errorResult("pi_start", err instanceof AsyncToolError ? err : invalid((err as Error).message));
 	}

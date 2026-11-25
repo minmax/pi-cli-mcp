@@ -60,9 +60,23 @@ describe("answer selection", () => {
 	it("never returns the raw transcript when the stream is not the expected contract", async () => {
 		const res = await run({ FAKE_MODE: "garbage" });
 		expect(res.isError).toBe(true);
-		expect(res.text).toContain("did not match the expected");
-		// The diagnostic describes the shape only — no transcript content.
+		// The whole stream is malformed lines: the failure names the contract
+		// violation by count, never the transcript content.
+		expect(res.text).toContain("emitted 2 malformed lines on its protocol stdout");
 		expect(res.text).not.toContain("not json");
+	});
+
+	it("fails closed on a malformed line mid-stream, even though the turn settles", async () => {
+		// Valid events on both sides of one corrupt line: the run must not report
+		// success, and the diagnostic must not echo the line itself.
+		const res = await run({ FAKE_GARBAGE_LINE: "1" });
+		expect(res.isError).toBe(true);
+		expect(res.text).toContain("emitted 1 malformed line on its protocol stdout");
+		expect(res.text).not.toContain("this line is not json");
+		// The turn still settled, so the failure report keeps the last thing pi said
+		// and the session for a retry.
+		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
+		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
 	});
 });
 

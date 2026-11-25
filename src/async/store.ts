@@ -37,6 +37,7 @@ import {
 	ASYNC_MAX_STORE_BYTES,
 	ASYNC_PARTIAL_RETENTION_MS,
 	ASYNC_TEST_FAIL_POINT,
+	ASYNC_TEST_FAIL_RETENTION,
 	ASYNC_TEST_FAIL_STATE,
 	ASYNC_TOMBSTONE_RETENTION_MS,
 } from "../config.ts";
@@ -360,38 +361,48 @@ export class ExecutionStore {
 		return this.lookup(id, now);
 	}
 
+	/**
+	 * Test seam (see config): fail the next retention mutation exactly like a
+	 * real write failure — the store goes unhealthy and the error propagates.
+	 */
+	private injectedRetentionFailure(): void {
+		if (ASYNC_TEST_FAIL_RETENTION) {
+			this.healthy_ = false;
+			throw new StoreUnavailableError("injected retention failure");
+		}
+	}
+
 	private applyExpiry(record: ExecutionRecord, now: number): ExecutionRecord | "tombstone" | "deleted" {
 		if (!isTerminal(record.state)) return record;
 		const finished = record.finished_at ?? record.accepted_at;
 
 		// Partial history expires first; detectable via the retained floor.
 		if (record.events.length > 0 && now > finished + ASYNC_PARTIAL_RETENTION_MS) {
+			this.injectedRetentionFailure();
 			const next: ExecutionRecord = {
 				...record,
 				events: [],
 				oldest_retained_seq: record.latest_seq + 1,
 			};
-			try {
-				this.commit(next);
-				record = next;
-			} catch {
-				// Unhealthy store: serve the record as-is rather than guess.
-			}
+			// A failed expiry is not a stale-read policy: commit() has already
+			// marked the store unhealthy, and the error propagates so the
+			// triggering request fails closed — no stale record, and never a
+			// result for a mutation that was never committed.
+			this.commit(next);
+			record = next;
 		}
 
 		if (record.finals_expired === true) {
 			if (now > finished + ASYNC_FINAL_RETENTION_MS + ASYNC_TOMBSTONE_RETENTION_MS) {
-				try {
-					this.deleteRecord(record.execution_id);
-					return "deleted";
-				} catch {
-					return "tombstone";
-				}
+				this.injectedRetentionFailure();
+				this.deleteRecord(record.execution_id);
+				return "deleted";
 			}
 			return "tombstone";
 		}
 
 		if (now > finished + ASYNC_FINAL_RETENTION_MS) {
+			this.injectedRetentionFailure();
 			const tomb: ExecutionRecord = {
 				...record,
 				events: [],
@@ -399,11 +410,7 @@ export class ExecutionStore {
 				final: null,
 				finals_expired: true,
 			};
-			try {
-				this.commit(tomb);
-			} catch {
-				// Serve the un-expired record; expiry retries on the next lookup.
-			}
+			this.commit(tomb);
 			return "tombstone";
 		}
 
@@ -418,8 +425,9 @@ export class ExecutionStore {
 	 */
 	sweep(now = Date.now()): void {
 		for (const record of this.allRecords()) {
+			// Throws on a failed retention mutation: the store is already
+			// unhealthy, and the caller fails closed instead of sweeping on.
 			this.applyExpiry(record, now);
-			if (!this.healthy_) return;
 		}
 
 		const terminal = this.allRecords()
@@ -429,11 +437,9 @@ export class ExecutionStore {
 		let bytes = this.bytes;
 		for (const record of terminal) {
 			if (count <= ASYNC_MAX_RECORDS && bytes <= ASYNC_MAX_STORE_BYTES) break;
-			try {
-				this.deleteRecord(record.execution_id);
-			} catch {
-				return;
-			}
+			// Same rule as expiry: a delete failure propagates, unhealthy and
+			// loud, rather than silently leaving the store over its bounds.
+			this.deleteRecord(record.execution_id);
 			count -= 1;
 			bytes -= recordBytes(record);
 		}

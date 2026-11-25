@@ -27,6 +27,13 @@ export interface RunResult {
 	timedOut?: boolean;
 	cancelled?: boolean;
 	/**
+	 * How many nonblank lines on pi's protocol stdout failed to parse as
+	 * JSON. Any value above zero is a contract violation — the run must not be
+	 * reported as a success even if the surviving events settle the turn.
+	 * A count, not the text: the line itself is never echoed.
+	 */
+	corruptLines?: number;
+	/**
 	 * How an interrupted run actually ended: `abort` means the transport closed
 	 * the turn in-protocol and pi exited on its own, `signal` means it had to be
 	 * killed. Only set when the run was interrupted.
@@ -255,6 +262,7 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 		let pending = "";
 		let timedOut = false;
 		let cancelled = false;
+		let corruptLines = 0;
 		let killTimer: NodeJS.Timeout | undefined;
 		let gracefulTimer: NodeJS.Timeout | undefined;
 		let endedBy: "abort" | "signal" | undefined;
@@ -343,10 +351,22 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 		const consumeLine = (line: string): void => {
 			const trimmed = line.trim();
 			if (!trimmed || !onEvent) return;
+			let event: unknown;
 			try {
-				onEvent(JSON.parse(trimmed));
+				event = JSON.parse(trimmed);
 			} catch {
-				// Not a JSON event line — the raw capture keeps it for diagnostics.
+				// A nonblank line that is not JSON is a protocol violation, not noise.
+				// Count it and fail closed at settle — never normalize the
+				// unrecognized into success. The raw capture keeps the line for
+				// diagnostics, but its text is never reported to a caller.
+				corruptLines += 1;
+				return;
+			}
+			try {
+				onEvent(event);
+			} catch {
+				// An event-handler error is ours, not pi's: it does not say anything
+				// about the stream contract, so it must not mark the run corrupt.
 			}
 		};
 
@@ -462,6 +482,7 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 				...(child.pid !== undefined && code !== null && code >= 0 ? { exitCode: code } : {}),
 				...(signal === null ? {} : { signal }),
 				...(endedBy ? { endedBy } : {}),
+				...(corruptLines > 0 ? { corruptLines } : {}),
 			});
 		});
 	});

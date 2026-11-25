@@ -35,6 +35,15 @@ operator who sets none of the variables below.
   transition, with exactly two arguments (execution id, terminal state), no shell, an empty
   environment, and a bounded whole-group reap on timeout. No delivery guarantee, no retry, no replay;
   the server logs only a bounded one-line status and never reads the wrapper's output.
+- **Fail-closed hardening across the async path.** A nonblank malformed line on pi's protocol stdout
+  fails the run — sync and async alike — even when the surviving events settle the turn; the
+  diagnostic reports the count, never the line. Reload validates a record's final against the exact
+  shape the writer emits and refuses the record otherwise. Retention mutations (event expiry,
+  tombstone commit, delete) propagate their failures: the store goes unhealthy, the triggering
+  request reports `store_unavailable`, live jobs are cancelled and nothing further dispatches —
+  never a stale read or an expiry result that was never committed. `pi_start` resolves `cwd` on an
+  idempotency-key miss only, so an identical retry still finds its execution after the directory
+  disappears.
 
 ## 0.7.1 — 2026-09-08
 

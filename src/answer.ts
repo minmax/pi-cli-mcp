@@ -343,11 +343,13 @@ export function renderFailure(
 	const reason =
 		result.cleanupUnverified === true
 			? "the turn ended but its process group could not be confirmed empty; leftover processes may still be running"
-			: result.cancelled
-				? `cancelled by the client; ${ending}`
-				: result.timedOut
-					? `timed out${session.timeoutMs === undefined ? "" : ` after ${session.timeoutMs} ms`}; ${ending}`
-					: `exited with code ${result.code}`;
+			: result.corruptLines !== undefined
+				? `emitted ${result.corruptLines} malformed line${result.corruptLines === 1 ? "" : "s"} on its protocol stdout; the event stream contract was violated`
+				: result.cancelled
+					? `cancelled by the client; ${ending}`
+					: result.timedOut
+						? `timed out${session.timeoutMs === undefined ? "" : ` after ${session.timeoutMs} ms`}; ${ending}`
+						: `exited with code ${result.code}`;
 
 	const parts = [`[session: ${session.id}]`, `[error: pi ${reason}]`];
 

@@ -135,6 +135,57 @@ function isProcessDiagnostics(value: unknown): value is ProcessDiagnostics {
 	);
 }
 
+function isFinalAnswer(value: unknown): value is FinalAnswer {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const answer = value as Record<string, unknown>;
+	if (typeof answer.text !== "string") return false;
+	if (answer.stop_reason !== undefined && typeof answer.stop_reason !== "string") return false;
+	if (typeof answer.truncated !== "boolean" || typeof answer.complete !== "boolean") return false;
+	return true;
+}
+
+/** The full shape the scheduler's writer emits — nothing is cast on reload. */
+function isFinalOutcome(value: unknown): value is FinalOutcome {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const final = value as Record<string, unknown>;
+	if (
+		final.outcome !== "succeeded" &&
+		final.outcome !== "failed" &&
+		final.outcome !== "cancelled" &&
+		final.outcome !== "interrupted"
+	)
+		return false;
+	if (final.answer !== null && !isFinalAnswer(final.answer)) return false;
+	if (typeof final.failure_reason !== "string" && final.failure_reason !== null) return false;
+	if (final.process_diagnostics !== undefined && !isProcessDiagnostics(final.process_diagnostics)) return false;
+	if (typeof final.provider !== "string" && final.provider !== null) return false;
+	if (typeof final.model !== "string" && final.model !== null) return false;
+	const usage = final.usage;
+	if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return false;
+	const { input, output, reasoning, cost } = usage as Record<string, unknown>;
+	if (
+		typeof input !== "number" ||
+		!Number.isFinite(input) ||
+		typeof output !== "number" ||
+		!Number.isFinite(output) ||
+		typeof reasoning !== "number" ||
+		!Number.isFinite(reasoning) ||
+		typeof cost !== "number" ||
+		!Number.isFinite(cost)
+	)
+		return false;
+	if (!Array.isArray(final.tool_calls)) return false;
+	for (const call of final.tool_calls) {
+		if (typeof call !== "object" || call === null || Array.isArray(call)) return false;
+		const { name, count } = call as Record<string, unknown>;
+		if (typeof name !== "string" || typeof count !== "number" || !Number.isFinite(count)) return false;
+	}
+	if (typeof final.turns !== "number" || !Number.isFinite(final.turns)) return false;
+	if (typeof final.retries !== "number" || !Number.isFinite(final.retries)) return false;
+	if (typeof final.elapsed_ms !== "number" || !Number.isFinite(final.elapsed_ms)) return false;
+	return true;
+}
+
 // --- persisted record ------------------------------------------------------
 
 export interface ExecutionRecord {
@@ -210,18 +261,11 @@ export function readExecutionRecord(value: unknown): ExecutionRecord | null {
 	if (typeof entry.oldest_retained_seq !== "number" || !Number.isFinite(entry.oldest_retained_seq)) return null;
 	if (typeof entry.latest_seq !== "number" || !Number.isFinite(entry.latest_seq)) return null;
 	if (entry.final !== null && entry.final !== undefined) {
-		const final = entry.final as Record<string, unknown>;
-		if (typeof final !== "object" || final === null) return null;
-		if (
-			final.outcome !== "succeeded" &&
-			final.outcome !== "failed" &&
-			final.outcome !== "cancelled" &&
-			final.outcome !== "interrupted"
-		)
-			return null;
-		if (typeof final.failure_reason !== "string" && final.failure_reason !== null) return null;
-		if (typeof final.turns !== "number" || typeof final.retries !== "number") return null;
-		if (final.process_diagnostics !== undefined && !isProcessDiagnostics(final.process_diagnostics)) return null;
+		// Fail closed on reload: a final that is not exactly the shape the writer
+		// emits refuses the record — it is never cast into a result. `null` is a
+		// legitimate value (a run that has not settled, or a tombstone with its
+		// final expired away) and passes untouched.
+		if (!isFinalOutcome(entry.final)) return null;
 	} else if (entry.final === undefined) {
 		return null;
 	}
@@ -245,7 +289,7 @@ export function readExecutionRecord(value: unknown): ExecutionRecord | null {
 		events,
 		oldest_retained_seq: entry.oldest_retained_seq,
 		latest_seq: entry.latest_seq,
-		final: (entry.final as FinalOutcome | null) ?? null,
+		final: entry.final === null ? null : (entry.final as FinalOutcome),
 		...(entry.finals_expired === true ? { finals_expired: true } : {}),
 	};
 }

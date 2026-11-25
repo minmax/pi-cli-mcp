@@ -155,7 +155,15 @@ export function asyncInit(): void {
 		});
 	}
 
-	store.sweep();
+	try {
+		store.sweep();
+	} catch {
+		// Retention failed at startup: the same closed state as an unopened
+		// store — every async call reports store_unavailable, sync tools are
+		// untouched, and recovery is the same operator lock-and-restart path.
+		store = null;
+		warn("async execution store is unavailable; pi_start/pi_status/pi_result/pi_cancel will fail closed");
+	}
 }
 
 /**
@@ -342,7 +350,15 @@ export async function accept(intent: StartIntent, requestToken: CancelToken): Pr
 		thinking = intent.thinking ?? known.thinking;
 	} else {
 		sessionId = randomUUID();
-		cwd = resolveCwd(intent.explicitCwd ? intent.cwd : undefined);
+		try {
+			cwd = resolveCwd(intent.explicitCwd ? intent.cwd : undefined);
+		} catch (err) {
+			// Same typed refusal the tool layer used to run up front: a mutable
+			// filesystem check has no business failing an identical retry, so it
+			// lives here, on the key miss - but a fresh request for a directory
+			// that is gone is still invalid_input, never an untyped error.
+			throw new AsyncToolError("invalid_input", (err as Error).message);
+		}
 		model = intent.model ?? DEFAULT_MODEL ?? undefined;
 		thinking =
 			intent.thinking ??
@@ -366,7 +382,15 @@ export async function accept(intent: StartIntent, requestToken: CancelToken): Pr
 	}
 	// Retention pressure: prune oldest terminal records before deciding whether
 	// there is headroom; never evict active records to accept a job.
-	store.sweep();
+	try {
+		store.sweep();
+	} catch (err) {
+		// A retention mutation failed mid-sweep: the store is unhealthy, this
+		// request fails closed instead of admitting against unpruned state,
+		// and live jobs are cancelled — no further dispatch.
+		failClosed(`a retention commit during the admission sweep failed: ${(err as Error).message}`);
+		throw unavailable(err);
+	}
 	// Reserve, up front, the disk the accepted work can still grow into. Each
 	// live execution can add a full serialized event ring plus a final (both
 	// clipped to those exact byte caps), and the terminal commit writes the
@@ -753,7 +777,12 @@ function finalize(job: Job, acc: Accumulator, end: RunEnd, elapsedMs: number): v
 
 	const answer = selectAnswer(acc);
 	const problem = answerProblem(answer);
-	const failed = end.code !== 0 || end.timedOut === true || end.cancelled === true || end.cleanupUnverified === true;
+	const failed =
+		end.code !== 0 ||
+		end.timedOut === true ||
+		end.cancelled === true ||
+		end.cleanupUnverified === true ||
+		end.corruptLines !== undefined;
 	if (!failed && job.sawSettled && problem === null && answer.text !== null && answer.source === "settled") {
 		commitTerminal(job, "succeeded", null, answer, acc, elapsedMs);
 		return;
@@ -790,6 +819,9 @@ function failureReason(
 	answer: SelectedAnswer,
 ): string {
 	if (end.cleanupUnverified === true) return UNVERIFIED_CLEANUP;
+	if (end.corruptLines !== undefined) {
+		return `pi emitted ${end.corruptLines} malformed line${end.corruptLines === 1 ? "" : "s"} on its protocol stdout; the event stream contract was violated`;
+	}
 	if (end.timedOut === true) return `timed out after ${job.timeoutMs ?? "the configured"} ms`;
 	if (end.spawnErrorCode !== undefined) return `could not start pi (spawn error ${end.spawnErrorCode})`;
 	if (!sawSettled && end.rpcPromptAcknowledged !== true && end.code !== 0) {

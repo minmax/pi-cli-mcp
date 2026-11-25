@@ -261,6 +261,14 @@ export const ASYNC_TEST_FAIL_POINT =
 	process.env.PI_MCP_ASYNC_TEST_FAIL_POINT === "after_rename" ? "after_rename" : "before_rename";
 
 /**
+ * Test seam: PI_MCP_ASYNC_TEST_FAIL_RETENTION=1 fails the next retention
+ * mutation (event expiry, tombstone commit, or tombstone delete) exactly like
+ * a real write failure — the store goes unhealthy and the error propagates
+ * through lookup, key lookup, and the admission sweep.
+ */
+export const ASYNC_TEST_FAIL_RETENTION = process.env.PI_MCP_ASYNC_TEST_FAIL_RETENTION === "1";
+
+/**
  * When set, pi_start blocks right before the acceptance commit until this path
  * exists. Opens the window in which an MCP request cancellation can still land
  * before the execution becomes durable.

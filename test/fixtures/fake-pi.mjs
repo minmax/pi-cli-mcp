@@ -19,6 +19,7 @@
 //   FAKE_MODE=empty_final  settles with no text at all
 //   FAKE_MODE=no_stop      final message carries no stopReason
 //   FAKE_MODE=garbage      non-JSON output, i.e. a broken event contract
+//   FAKE_GARBAGE_LINE=1     one non-JSON line mid-stream, valid events on both sides
 //   FAKE_MODE=no_newline   last event is EOF-terminated, not newline-terminated
 //   FAKE_MODE=overlap      detects concurrent runs on one session via a lockfile
 //   FAKE_STOP=<reason>     stopReason on the final message (default "stop")
@@ -383,6 +384,12 @@ async function runScenario() {
 	});
 	out({ type: "tool_execution_start", toolName: "write" });
 	out({ type: "tool_execution_end", toolName: "write", isError: false });
+	if (process.env.FAKE_GARBAGE_LINE === "1") {
+		// A nonblank, non-JSON line with valid events on both sides: partial stream
+		// corruption. Everything else settles cleanly, so only fail-closed corruption
+		// tracking can keep this run from reporting success.
+		process.stdout.write("this line is not json\n");
+	}
 	out({ type: "turn_start" });
 	finalMessage("FINAL ANSWER");
 	out({ type: "agent_end", willRetry: false });
