@@ -345,11 +345,13 @@ export function renderFailure(
 			? "the turn ended but its process group could not be confirmed empty; leftover processes may still be running"
 			: result.corruptLines !== undefined
 				? `emitted ${result.corruptLines} malformed line${result.corruptLines === 1 ? "" : "s"} on its protocol stdout; the event stream contract was violated`
-				: result.cancelled
-					? `cancelled by the client; ${ending}`
-					: result.timedOut
-						? `timed out${session.timeoutMs === undefined ? "" : ` after ${session.timeoutMs} ms`}; ${ending}`
-						: `exited with code ${result.code}`;
+				: result.droppedLines !== undefined
+					? `dropped ${result.droppedLines} line${result.droppedLines === 1 ? "" : "s"} longer than the capture limit without reading ${result.droppedLines === 1 ? "it" : "them"}; the event stream contract was violated`
+					: result.cancelled
+						? `cancelled by the client; ${ending}`
+						: result.timedOut
+							? `timed out${session.timeoutMs === undefined ? "" : ` after ${session.timeoutMs} ms`}; ${ending}`
+							: `exited with code ${result.code}`;
 
 	const parts = [`[session: ${session.id}]`, `[error: pi ${reason}]`];
 

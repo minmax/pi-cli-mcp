@@ -33,6 +33,8 @@ export interface RunResult {
 	 * A count, not the text: the line itself is never echoed.
 	 */
 	corruptLines?: number;
+	/** Lines dropped for exceeding MAX_LINE before they could be read. */
+	droppedLines?: number;
 	/**
 	 * How an interrupted run actually ended: `abort` means the transport closed
 	 * the turn in-protocol and pi exited on its own, `signal` means it had to be
@@ -263,6 +265,7 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 		let timedOut = false;
 		let cancelled = false;
 		let corruptLines = 0;
+		let droppedLines = 0;
 		let killTimer: NodeJS.Timeout | undefined;
 		let gracefulTimer: NodeJS.Timeout | undefined;
 		let endedBy: "abort" | "signal" | undefined;
@@ -384,9 +387,12 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 				newline = pending.indexOf("\n");
 			}
 			// A single unterminated line must not grow without bound; MAX_CAPTURE
-			// guards the transcript copy, not the line being assembled here.
+			// guards the transcript copy, not the line being assembled here. The
+			// drop is recorded, never silent: a line the reader did not consume is
+			// a contract violation whether or not it was parseable.
 			if (pending.length > MAX_LINE) {
 				process.stderr.write(`pi-mcp: dropping an over-long event line (${pending.length} > ${MAX_LINE} chars)\n`);
+				droppedLines += 1;
 				pending = "";
 			}
 		});
@@ -429,7 +435,11 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 				consumeLine(pending);
 				pending = "";
 			}
-			const finalResult: RunResult = corruptLines > 0 ? { ...result, corruptLines } : result;
+			const finalResult: RunResult = {
+				...result,
+				...(corruptLines > 0 ? { corruptLines } : {}),
+				...(droppedLines > 0 ? { droppedLines } : {}),
+			};
 			if (!liveTrees.has(tree)) {
 				resolve(finalResult);
 				return;

@@ -446,8 +446,14 @@ export async function callPi(input: Record<string, unknown>, ctx: CallContext): 
 	// the sweep proves the leftovers are gone — otherwise a follow-up could run
 	// beside whatever survived.
 	const unverified = outcome.result.cleanupUnverified === true;
-	const corrupt = outcome.result.corruptLines !== undefined;
-	if (outcome.result.code !== 0 || outcome.result.timedOut || outcome.result.cancelled || unverified || corrupt) {
+	const streamViolated = outcome.result.corruptLines !== undefined || outcome.result.droppedLines !== undefined;
+	if (
+		outcome.result.code !== 0 ||
+		outcome.result.timedOut ||
+		outcome.result.cancelled ||
+		unverified ||
+		streamViolated
+	) {
 		return toolResult(
 			renderFailure(outcome.acc, outcome.result, outcome.elapsedMs, {
 				id: sessionId,
@@ -514,8 +520,14 @@ export async function callPiReply(input: Record<string, unknown>, ctx: CallConte
 	// the sweep proves the leftovers are gone — otherwise a follow-up could run
 	// beside whatever survived.
 	const unverified = outcome.result.cleanupUnverified === true;
-	const corrupt = outcome.result.corruptLines !== undefined;
-	if (outcome.result.code !== 0 || outcome.result.timedOut || outcome.result.cancelled || unverified || corrupt) {
+	const streamViolated = outcome.result.corruptLines !== undefined || outcome.result.droppedLines !== undefined;
+	if (
+		outcome.result.code !== 0 ||
+		outcome.result.timedOut ||
+		outcome.result.cancelled ||
+		unverified ||
+		streamViolated
+	) {
 		// Keep the session current even on failure: the conversation on disk grew,
 		// and the next attempt should resume in the same place.
 		rememberSession(session, cwd, {});

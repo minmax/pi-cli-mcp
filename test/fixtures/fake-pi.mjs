@@ -21,6 +21,7 @@
 //   FAKE_MODE=garbage      non-JSON output, i.e. a broken event contract
 //   FAKE_GARBAGE_LINE=1     one non-JSON line mid-stream, valid events on both sides
 //   FAKE_GARBAGE_EOF=1      the stream ends on a non-JSON line with no trailing newline
+//   FAKE_GARBAGE_EOF_SIZE   pad that tail to N chars (over-long drop path)
 //   FAKE_MODE=no_newline   last event is EOF-terminated, not newline-terminated
 //   FAKE_MODE=overlap      detects concurrent runs on one session via a lockfile
 //   FAKE_STOP=<reason>     stopReason on the final message (default "stop")
@@ -118,11 +119,15 @@ function exitWhenDrained(code) {
 let garbageEofDone = false;
 /** FAKE_GARBAGE_EOF=1: write the unterminated malformed tail exactly once,
  * whether the scenario already ended with it (print mode) or the exit path
- * appends it (rpc mode). */
+ * appends it (rpc mode). FAKE_GARBAGE_EOF_SIZE pads the tail to that many
+ * characters, for the over-long-line drop path. */
 function garbageEof() {
 	if (garbageEofDone) return;
 	garbageEofDone = true;
-	if (process.env.FAKE_GARBAGE_EOF === "1") process.stdout.write("this line is not json");
+	if (process.env.FAKE_GARBAGE_EOF === "1") {
+		const size = Number(process.env.FAKE_GARBAGE_EOF_SIZE ?? 0);
+		process.stdout.write(size > 0 ? "x".repeat(size) : "this line is not json");
+	}
 }
 
 // `--mode rpc`: pi stays up, reads JSONL commands on stdin, and ends the turn

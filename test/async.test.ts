@@ -327,6 +327,36 @@ describe("async tools", () => {
 		expect(startedCount(ws)).toBe(1);
 	});
 
+	test("an over-long tail dropped unread fails the run too", async () => {
+		const ws = track(makeAsyncWorkspace());
+		const client = new Client({
+			...ws.asyncEnv,
+			// The tail exceeds the reader's capture limit: it is dropped before
+			// parsing, and a line the reader never saw must still fail the run.
+			PI_MCP_MAX_LINE: "100000",
+			FAKE_GARBAGE_EOF: "1",
+			FAKE_GARBAGE_EOF_SIZE: "110000",
+			FAKE_STARTED_FILE: startedFile(ws),
+		});
+		cleanup.push(() => client.close());
+
+		const start = await client.tool("pi_start", { prompt: "over-long eof tail test prompt" });
+		const args = { execution_id: start.structured.execution_id };
+		await waitFor("failed", async () => (await client.tool("pi_status", args)).structured.state === "failed");
+		const result = await client.tool("pi_result", args);
+		expect(result.structured.state).toBe("failed");
+		expect(result.structured.final).toMatchObject({
+			outcome: "failed",
+			failure_reason:
+				"pi dropped 1 line longer than the capture limit without reading it; the event stream contract was violated",
+			retries: 0,
+		});
+		// The dropped content is never echoed, in the final or the projection.
+		expect(JSON.stringify(result.structured)).not.toContain("xxxx");
+		expect(result.text).not.toContain("xxxx");
+		expect(startedCount(ws)).toBe(1);
+	});
+
 	test("a malformed persisted final is refused on restart, not served by pi_result", async () => {
 		const ws = track(makeAsyncWorkspace());
 		// Supervisor A: complete a job so a terminal final lands on disk.

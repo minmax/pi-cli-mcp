@@ -90,6 +90,20 @@ describe("answer selection", () => {
 		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
 		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
 	});
+
+	it("fails closed when an over-long tail is dropped unread, even though the turn settles", async () => {
+		// The malformed tail exceeds the capture limit and is dropped before it
+		// can be parsed: content the reader never saw must still fail the run.
+		const res = await run({ FAKE_GARBAGE_EOF: "1", FAKE_GARBAGE_EOF_SIZE: "110000", PI_MCP_MAX_LINE: "100000" });
+		expect(res.isError).toBe(true);
+		expect(res.text).toContain(
+			"dropped 1 line longer than the capture limit without reading it; the event stream contract was violated",
+		);
+		// The dropped content is never echoed.
+		expect(res.text).not.toContain("xxxx");
+		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
+		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
+	});
 });
 
 describe("stopReason is fail-closed", () => {

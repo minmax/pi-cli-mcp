@@ -782,7 +782,8 @@ function finalize(job: Job, acc: Accumulator, end: RunEnd, elapsedMs: number): v
 		end.timedOut === true ||
 		end.cancelled === true ||
 		end.cleanupUnverified === true ||
-		end.corruptLines !== undefined;
+		end.corruptLines !== undefined ||
+		end.droppedLines !== undefined;
 	if (!failed && job.sawSettled && problem === null && answer.text !== null && answer.source === "settled") {
 		commitTerminal(job, "succeeded", null, answer, acc, elapsedMs);
 		return;
@@ -821,6 +822,9 @@ function failureReason(
 	if (end.cleanupUnverified === true) return UNVERIFIED_CLEANUP;
 	if (end.corruptLines !== undefined) {
 		return `pi emitted ${end.corruptLines} malformed line${end.corruptLines === 1 ? "" : "s"} on its protocol stdout; the event stream contract was violated`;
+	}
+	if (end.droppedLines !== undefined) {
+		return `pi dropped ${end.droppedLines} line${end.droppedLines === 1 ? "" : "s"} longer than the capture limit without reading ${end.droppedLines === 1 ? "it" : "them"}; the event stream contract was violated`;
 	}
 	if (end.timedOut === true) return `timed out after ${job.timeoutMs ?? "the configured"} ms`;
 	if (end.spawnErrorCode !== undefined) return `could not start pi (spawn error ${end.spawnErrorCode})`;
