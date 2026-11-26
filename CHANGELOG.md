@@ -39,7 +39,9 @@ operator who sets none of the variables below.
   fails the run — sync and async alike — even when the surviving events settle the turn; the
   diagnostic reports the count, never the line. A malformed EOF tail with no trailing newline
   fails it too, as does a line dropped for exceeding the capture limit — content the reader never
-  saw is a contract violation, not a success. Reload validates a record's final against the exact
+  saw is a contract violation, not a success. The limit applies to every line before it is
+  parsed, not only to an unterminated leftover; a dropped line's remainder is discarded through
+  its next newline so it cannot masquerade as a fresh line, and it is counted once. Reload validates a record's final against the exact
   shape the writer emits and refuses the record otherwise. Retention mutations (event expiry,
   tombstone commit, delete) propagate their failures: the store goes unhealthy, the triggering
   request reports `store_unavailable`, live jobs are cancelled and nothing further dispatches —

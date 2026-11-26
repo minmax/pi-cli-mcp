@@ -357,6 +357,36 @@ describe("async tools", () => {
 		expect(startedCount(ws)).toBe(1);
 	});
 
+	test("a complete over-long line is dropped before parsing, and the lines after it still project", async () => {
+		const ws = track(makeAsyncWorkspace());
+		const client = new Client({
+			...ws.asyncEnv,
+			// A newline-terminated line over the capture limit: the drop happens
+			// before the parser sees it, and parsing resumes at the next line.
+			PI_MCP_MAX_LINE: "100000",
+			FAKE_GARBAGE_COMPLETE: "1",
+			FAKE_STARTED_FILE: startedFile(ws),
+		});
+		cleanup.push(() => client.close());
+
+		const start = await client.tool("pi_start", { prompt: "complete over-long line test prompt" });
+		const args = { execution_id: start.structured.execution_id };
+		await waitFor("failed", async () => (await client.tool("pi_status", args)).structured.state === "failed");
+		const result = await client.tool("pi_result", args);
+		expect(result.structured.state).toBe("failed");
+		expect(result.structured.final).toMatchObject({
+			outcome: "failed",
+			failure_reason:
+				"pi dropped 1 line longer than the capture limit without reading it; the event stream contract was violated",
+			retries: 0,
+		});
+		expect(JSON.stringify(result.structured)).not.toContain("malformed line");
+		expect(JSON.stringify(result.structured)).not.toContain("xxxx");
+		// The valid events after the dropped line still projected.
+		expect(JSON.stringify(result.structured)).toContain("FINAL ANSWER");
+		expect(startedCount(ws)).toBe(1);
+	});
+
 	test("a malformed persisted final is refused on restart, not served by pi_result", async () => {
 		const ws = track(makeAsyncWorkspace());
 		// Supervisor A: complete a job so a terminal final lands on disk.

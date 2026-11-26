@@ -33,7 +33,8 @@ export interface RunResult {
 	 * A count, not the text: the line itself is never echoed.
 	 */
 	corruptLines?: number;
-	/** Lines dropped for exceeding MAX_LINE before they could be read. */
+	/** Lines discarded for exceeding MAX_LINE — before parsing, or from an
+	 * unterminated buffer — counted once each, never silently. */
 	droppedLines?: number;
 	/**
 	 * How an interrupted run actually ended: `abort` means the transport closed
@@ -262,6 +263,9 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 		let stdout = "";
 		let stderr = "";
 		let pending = "";
+		// True between dropping an over-long unterminated line and its next newline:
+		// every byte in that window belongs to the dropped line, not a fresh one.
+		let droppingLine = false;
 		let timedOut = false;
 		let cancelled = false;
 		let corruptLines = 0;
@@ -376,13 +380,35 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 		child.stdout?.setEncoding("utf8");
 		child.stderr?.setEncoding("utf8");
 
+		const dropLine = (length: number): void => {
+			process.stderr.write(`pi-mcp: dropping an over-long event line (${length} > ${MAX_LINE} chars)\n`);
+			droppedLines += 1;
+		};
+
 		child.stdout?.on("data", (chunk: string) => {
 			stdout = appendCapped(stdout, chunk);
 			if (!onEvent) return;
-			pending += chunk;
+			// The tail of a dropped line: discard through its newline so the
+			// remainder cannot masquerade as a fresh line in the parser.
+			let rest = chunk;
+			if (droppingLine) {
+				const nl = rest.indexOf("\n");
+				if (nl === -1) return;
+				droppingLine = false;
+				rest = rest.slice(nl + 1);
+			}
+			pending += rest;
 			let newline = pending.indexOf("\n");
 			while (newline !== -1) {
-				consumeLine(pending.slice(0, newline));
+				// The capture limit applies to every line before it is parsed —
+				// an over-long line is discarded through its newline and counted
+				// once, whatever its content and whatever arrives after it.
+				const line = pending.slice(0, newline);
+				if (line.length > MAX_LINE) {
+					dropLine(line.length);
+				} else {
+					consumeLine(line);
+				}
 				pending = pending.slice(newline + 1);
 				newline = pending.indexOf("\n");
 			}
@@ -391,9 +417,9 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 			// drop is recorded, never silent: a line the reader did not consume is
 			// a contract violation whether or not it was parseable.
 			if (pending.length > MAX_LINE) {
-				process.stderr.write(`pi-mcp: dropping an over-long event line (${pending.length} > ${MAX_LINE} chars)\n`);
-				droppedLines += 1;
+				dropLine(pending.length);
 				pending = "";
+				droppingLine = true;
 			}
 		});
 

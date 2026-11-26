@@ -22,6 +22,9 @@
 //   FAKE_GARBAGE_LINE=1     one non-JSON line mid-stream, valid events on both sides
 //   FAKE_GARBAGE_EOF=1      the stream ends on a non-JSON line with no trailing newline
 //   FAKE_GARBAGE_EOF_SIZE   pad that tail to N chars (over-long drop path)
+//   FAKE_GARBAGE_COMPLETE=1  one complete over-long line mid-stream (newline included)
+//   FAKE_GARBAGE_SIZE       its size in chars (default 110000)
+//   FAKE_GARBAGE_COMPLETE_SPLIT=1  its newline travels in a second flush, after the head
 //   FAKE_MODE=no_newline   last event is EOF-terminated, not newline-terminated
 //   FAKE_MODE=overlap      detects concurrent runs on one session via a lockfile
 //   FAKE_STOP=<reason>     stopReason on the final message (default "stop")
@@ -409,14 +412,38 @@ async function runScenario() {
 		// tracking can keep this run from reporting success.
 		process.stdout.write("this line is not json\n");
 	}
-	out({ type: "turn_start" });
-	finalMessage("FINAL ANSWER");
-	out({ type: "agent_end", willRetry: false });
-	out({ type: "agent_settled" });
-	// Print mode exits by falling off the end here: the tail lands as the last
-	// stdout bytes before the natural exit.
-	garbageEof();
-	process.exitCode = exitCode;
+	// The tail of the default scenario. The split over-long variant waits for
+	// the oversized head to flush before sending its newline, so everything after
+	// it must still parse once the dropped line is behind the reader.
+	const finishScenario = () => {
+		out({ type: "turn_start" });
+		finalMessage("FINAL ANSWER");
+		out({ type: "agent_end", willRetry: false });
+		out({ type: "agent_settled" });
+		// Print mode exits by falling off the end here: the tail lands as the last
+		// stdout bytes before the natural exit.
+		garbageEof();
+		process.exitCode = exitCode;
+	};
+
+	if (process.env.FAKE_GARBAGE_COMPLETE === "1") {
+		const size = Number(process.env.FAKE_GARBAGE_SIZE ?? 110000);
+		if (process.env.FAKE_GARBAGE_COMPLETE_SPLIT === "1") {
+			// The oversized head flushes before its newline travels: the reader must
+			// drop the head, discard the rest of the line through that newline, and
+			// still parse the valid lines that follow.
+			process.stdout.write("x".repeat(size - 10), () => {
+				setTimeout(() => {
+					process.stdout.write("x".repeat(10) + "\n", finishScenario);
+				}, 0);
+			});
+			return;
+		}
+		// One complete over-long line, newline included: the capture limit
+		// applies before parsing, not only to unterminated leftovers.
+		process.stdout.write("x".repeat(size) + "\n");
+	}
+	finishScenario();
 }
 
 /**

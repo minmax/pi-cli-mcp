@@ -104,6 +104,38 @@ describe("answer selection", () => {
 		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
 		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
 	});
+
+	it("applies the capture limit to complete lines before parsing them", async () => {
+		// A newline-terminated line over the limit: the drop must happen before
+		// the parser ever sees it, whatever its content.
+		const res = await run({ FAKE_GARBAGE_COMPLETE: "1", PI_MCP_MAX_LINE: "100000" });
+		expect(res.isError).toBe(true);
+		expect(res.text).toContain(
+			"dropped 1 line longer than the capture limit without reading it; the event stream contract was violated",
+		);
+		expect(res.text).not.toContain("malformed line");
+		// The valid line after the drop still parses.
+		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
+		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
+	});
+
+	it("discards a dropped line's remainder through its newline and counts it once", async () => {
+		// The oversized head flushes before its newline travels: the remainder
+		// must never reach the parser as a fresh line, and the count stays at one.
+		const res = await run({
+			FAKE_GARBAGE_COMPLETE: "1",
+			FAKE_GARBAGE_COMPLETE_SPLIT: "1",
+			PI_MCP_MAX_LINE: "100000",
+		});
+		expect(res.isError).toBe(true);
+		expect(res.text).toContain(
+			"dropped 1 line longer than the capture limit without reading it; the event stream contract was violated",
+		);
+		expect(res.text).not.toContain("malformed line");
+		// The scenario continues after the dropped line's newline and settles.
+		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
+		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
+	});
 });
 
 describe("stopReason is fail-closed", () => {
