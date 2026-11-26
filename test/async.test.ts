@@ -2606,6 +2606,66 @@ describe("async tools", () => {
 		expect(raw.finals_expired).toBeUndefined();
 	});
 
+	test("a failed retention commit while a pi child is mid-flight reaps it and refuses everything", async () => {
+		const ws = track(makeAsyncWorkspace());
+		const retentionEnv: Record<string, string> = {
+			PI_MCP_ASYNC_PARTIAL_RETENTION_MS: "4000",
+			PI_MCP_ASYNC_TEST_FAIL_RETENTION: "1",
+			PI_MCP_KILL_GRACE_MS: "250",
+			FAKE_STARTED_FILE: startedFile(ws),
+		};
+
+		// Phase A: a fast fake settles job 1, starting the retention clock that
+		// phase B will cross with a live child on another execution.
+		const clientA = new Client({ ...ws.asyncEnv, ...retentionEnv });
+		const first = await clientA.tool("pi_start", { prompt: "will expire under a failing store" });
+		const exec1: string = first.structured.execution_id;
+		await waitFor("succeeded", async () => {
+			const res = await clientA.tool("pi_status", { execution_id: exec1 });
+			return res.structured?.state === "succeeded";
+		});
+		expect(startedCount(ws)).toBe(1);
+		clientA.child.kill("SIGTERM");
+		await new Promise<void>((resolve) => clientA.child.on("exit", () => resolve()));
+
+		// Phase B: fresh supervisor on the same state, slow fake, injection armed.
+		// Its boot and admission sweeps run well inside job 1's retention window,
+		// so the store opens clean and job 2 gets a genuinely mid-flight child.
+		const clientB = new Client({ ...ws.asyncEnv, ...retentionEnv, FAKE_RPC_SETTLE_MS: "60000" });
+		const second = await clientB.tool("pi_start", { prompt: "mid-flight child when the store dies" });
+		const exec2: string = second.structured.execution_id;
+		await waitFor("running", async () => {
+			const res = await clientB.tool("pi_status", { execution_id: exec2 });
+			return res.structured?.state === "running";
+		});
+		await waitFor("second fake pi spawned", () => startedCount(ws) === 2);
+		const runningPid = Number(readFileSync(startedFile(ws), "utf8").trim().split("\n").pop());
+		expect(pidAlive(runningPid)).toBe(true);
+
+		// The retention window elapses with the child live: the triggering
+		// lookup fails closed and typed, and the cancelled token reaps the
+		// running pi process instead of leaving it behind.
+		await sleep(4500);
+		expectErrorCode(await clientB.tool("pi_result", { execution_id: exec1 }), "store_unavailable");
+		await waitFor("running child reaped", () => !pidAlive(runningPid));
+
+		// No further dispatch: every entry point refuses the dead store.
+		expectErrorCode(await clientB.tool("pi_status", { execution_id: exec2 }), "store_unavailable");
+		expectErrorCode(await clientB.tool("pi_start", { prompt: "no work on a dead store" }), "store_unavailable");
+		await sleep(400);
+		expect(startedCount(ws)).toBe(2);
+
+		// Nothing uncommitted was served either way: the refused expiry left
+		// job 1 exactly as it settled, and job 2's ambiguous end was never
+		// written as a terminal it did not reach durably.
+		const raw1 = JSON.parse(readFileSync(join(ws.stateDir, "executions", `${exec1}.json`), "utf8"));
+		expect(raw1.state).toBe("succeeded");
+		expect(raw1.events.length).toBeGreaterThan(0);
+		expect(raw1.finals_expired).toBeUndefined();
+		const raw2 = JSON.parse(readFileSync(join(ws.stateDir, "executions", `${exec2}.json`), "utf8"));
+		expect(raw2.state).toBe("running");
+	});
+
 	test("a failing hook logs a bounded status, never its output, and blocks nothing", async () => {
 		const ws = track(makeAsyncWorkspace());
 		// A wrapper that fails loudly: nonzero exit with a sentinel on stderr,
