@@ -78,6 +78,18 @@ describe("answer selection", () => {
 		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
 		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
 	});
+
+	it("fails closed on a malformed line at EOF, unterminated by any newline", async () => {
+		// The corruption is the last stdout content with no trailing newline: it
+		// is only visible to a reader that parses the EOF tail before it
+		// snapshots its diagnostics.
+		const res = await run({ FAKE_GARBAGE_EOF: "1" });
+		expect(res.isError).toBe(true);
+		expect(res.text).toContain("emitted 1 malformed line on its protocol stdout");
+		expect(res.text).not.toContain("this line is not json");
+		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
+		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
+	});
 });
 
 describe("stopReason is fail-closed", () => {

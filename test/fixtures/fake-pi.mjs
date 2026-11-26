@@ -20,6 +20,7 @@
 //   FAKE_MODE=no_stop      final message carries no stopReason
 //   FAKE_MODE=garbage      non-JSON output, i.e. a broken event contract
 //   FAKE_GARBAGE_LINE=1     one non-JSON line mid-stream, valid events on both sides
+//   FAKE_GARBAGE_EOF=1      the stream ends on a non-JSON line with no trailing newline
 //   FAKE_MODE=no_newline   last event is EOF-terminated, not newline-terminated
 //   FAKE_MODE=overlap      detects concurrent runs on one session via a lockfile
 //   FAKE_STOP=<reason>     stopReason on the final message (default "stop")
@@ -106,9 +107,22 @@ while True:
  * process.exit mid-flush truncates the stream, and under concurrent load the
  * reader can fall behind far enough that a 20ms gamble loses a 400KB line. */
 function exitWhenDrained(code) {
+	// The EOF-tail variant of the corruption probe: whatever exit path runs,
+	// the last stdout bytes are one malformed, unterminated line.
+	garbageEof();
 	process.stdout.write("", () => {
 		setTimeout(() => process.exit(code), 0);
 	});
+}
+
+let garbageEofDone = false;
+/** FAKE_GARBAGE_EOF=1: write the unterminated malformed tail exactly once,
+ * whether the scenario already ended with it (print mode) or the exit path
+ * appends it (rpc mode). */
+function garbageEof() {
+	if (garbageEofDone) return;
+	garbageEofDone = true;
+	if (process.env.FAKE_GARBAGE_EOF === "1") process.stdout.write("this line is not json");
 }
 
 // `--mode rpc`: pi stays up, reads JSONL commands on stdin, and ends the turn
@@ -394,6 +408,9 @@ async function runScenario() {
 	finalMessage("FINAL ANSWER");
 	out({ type: "agent_end", willRetry: false });
 	out({ type: "agent_settled" });
+	// Print mode exits by falling off the end here: the tail lands as the last
+	// stdout bytes before the natural exit.
+	garbageEof();
 	process.exitCode = exitCode;
 }
 

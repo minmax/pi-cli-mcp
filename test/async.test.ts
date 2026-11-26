@@ -300,6 +300,33 @@ describe("async tools", () => {
 		expect(startedCount(ws)).toBe(1);
 	});
 
+	test("a malformed line at EOF, unterminated by any newline, fails closed too", async () => {
+		const ws = track(makeAsyncWorkspace());
+		const client = new Client({
+			...ws.asyncEnv,
+			// The corruption is the last stdout content with no trailing newline:
+			// only a reader that parses the EOF tail before snapshotting its
+			// diagnostics can still count it.
+			FAKE_GARBAGE_EOF: "1",
+			FAKE_STARTED_FILE: startedFile(ws),
+		});
+		cleanup.push(() => client.close());
+
+		const start = await client.tool("pi_start", { prompt: "corrupt eof tail test prompt" });
+		const args = { execution_id: start.structured.execution_id };
+		await waitFor("failed", async () => (await client.tool("pi_status", args)).structured.state === "failed");
+		const result = await client.tool("pi_result", args);
+		expect(result.structured.state).toBe("failed");
+		expect(result.structured.final).toMatchObject({
+			outcome: "failed",
+			failure_reason: "pi emitted 1 malformed line on its protocol stdout; the event stream contract was violated",
+			retries: 0,
+		});
+		expect(JSON.stringify(result.structured)).not.toContain("this line is not json");
+		expect(result.text).not.toContain("this line is not json");
+		expect(startedCount(ws)).toBe(1);
+	});
+
 	test("a malformed persisted final is refused on restart, not served by pi_result", async () => {
 		const ws = track(makeAsyncWorkspace());
 		// Supervisor A: complete a job so a terminal final lands on disk.

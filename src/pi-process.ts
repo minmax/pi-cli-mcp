@@ -422,12 +422,16 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 			}
 			// pi may end its last event at EOF instead of a newline; without this the
 			// final answer would be missed and the run would look contract-broken.
+			// The tail is parsed before the corruption marker is read back: a
+			// malformed unterminated line is still part of the stream, and a result
+			// snapshotted before this parse would report the run as clean.
 			if (pending) {
 				consumeLine(pending);
 				pending = "";
 			}
+			const finalResult: RunResult = corruptLines > 0 ? { ...result, corruptLines } : result;
 			if (!liveTrees.has(tree)) {
-				resolve(result);
+				resolve(finalResult);
 				return;
 			}
 			// The leader is gone but its group is not: a descendant is still
@@ -444,7 +448,7 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 			const killedAt = Date.now() + KILL_GRACE_MS;
 			const step = (): void => {
 				if (tree.gone()) {
-					resolve(result);
+					resolve(finalResult);
 					return;
 				}
 				const now = Date.now();
@@ -454,7 +458,7 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 					deadline = now + TREE_GONE_MS;
 				}
 				if (sent && now >= deadline) {
-					resolve({ ...result, cleanupUnverified: true });
+					resolve({ ...finalResult, cleanupUnverified: true });
 					return;
 				}
 				killTimer = setTimeout(step, 50);
@@ -482,7 +486,6 @@ export function runPi(args: string[], cwd: string, options: RunOptions = {}): Pr
 				...(child.pid !== undefined && code !== null && code >= 0 ? { exitCode: code } : {}),
 				...(signal === null ? {} : { signal }),
 				...(endedBy ? { endedBy } : {}),
-				...(corruptLines > 0 ? { corruptLines } : {}),
 			});
 		});
 	});
