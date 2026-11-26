@@ -18,6 +18,7 @@ export const printTransport: Transport = {
 				token: ctx.token,
 				timeoutMs: plan.timeoutMs,
 				onEvent,
+				onTreeGone: ctx.onTreeGone,
 			});
 		} finally {
 			cleanup();

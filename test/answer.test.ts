@@ -60,9 +60,81 @@ describe("answer selection", () => {
 	it("never returns the raw transcript when the stream is not the expected contract", async () => {
 		const res = await run({ FAKE_MODE: "garbage" });
 		expect(res.isError).toBe(true);
-		expect(res.text).toContain("did not match the expected");
-		// The diagnostic describes the shape only — no transcript content.
+		// The whole stream is malformed lines: the failure names the contract
+		// violation by count, never the transcript content.
+		expect(res.text).toContain("emitted 2 malformed lines on its protocol stdout");
 		expect(res.text).not.toContain("not json");
+	});
+
+	it("fails closed on a malformed line mid-stream, even though the turn settles", async () => {
+		// Valid events on both sides of one corrupt line: the run must not report
+		// success, and the diagnostic must not echo the line itself.
+		const res = await run({ FAKE_GARBAGE_LINE: "1" });
+		expect(res.isError).toBe(true);
+		expect(res.text).toContain("emitted 1 malformed line on its protocol stdout");
+		expect(res.text).not.toContain("this line is not json");
+		// The turn still settled, so the failure report keeps the last thing pi said
+		// and the session for a retry.
+		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
+		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
+	});
+
+	it("fails closed on a malformed line at EOF, unterminated by any newline", async () => {
+		// The corruption is the last stdout content with no trailing newline: it
+		// is only visible to a reader that parses the EOF tail before it
+		// snapshots its diagnostics.
+		const res = await run({ FAKE_GARBAGE_EOF: "1" });
+		expect(res.isError).toBe(true);
+		expect(res.text).toContain("emitted 1 malformed line on its protocol stdout");
+		expect(res.text).not.toContain("this line is not json");
+		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
+		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
+	});
+
+	it("fails closed when an over-long tail is dropped unread, even though the turn settles", async () => {
+		// The malformed tail exceeds the capture limit and is dropped before it
+		// can be parsed: content the reader never saw must still fail the run.
+		const res = await run({ FAKE_GARBAGE_EOF: "1", FAKE_GARBAGE_EOF_SIZE: "110000", PI_MCP_MAX_LINE: "100000" });
+		expect(res.isError).toBe(true);
+		expect(res.text).toContain(
+			"dropped 1 line longer than the capture limit without reading it; the event stream contract was violated",
+		);
+		// The dropped content is never echoed.
+		expect(res.text).not.toContain("xxxx");
+		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
+		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
+	});
+
+	it("applies the capture limit to complete lines before parsing them", async () => {
+		// A newline-terminated line over the limit: the drop must happen before
+		// the parser ever sees it, whatever its content.
+		const res = await run({ FAKE_GARBAGE_COMPLETE: "1", PI_MCP_MAX_LINE: "100000" });
+		expect(res.isError).toBe(true);
+		expect(res.text).toContain(
+			"dropped 1 line longer than the capture limit without reading it; the event stream contract was violated",
+		);
+		expect(res.text).not.toContain("malformed line");
+		// The valid line after the drop still parses.
+		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
+		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
+	});
+
+	it("discards a dropped line's remainder through its newline and counts it once", async () => {
+		// The oversized head flushes before its newline travels: the remainder
+		// must never reach the parser as a fresh line, and the count stays at one.
+		const res = await run({
+			FAKE_GARBAGE_COMPLETE: "1",
+			FAKE_GARBAGE_COMPLETE_SPLIT: "1",
+			PI_MCP_MAX_LINE: "100000",
+		});
+		expect(res.isError).toBe(true);
+		expect(res.text).toContain(
+			"dropped 1 line longer than the capture limit without reading it; the event stream contract was violated",
+		);
+		expect(res.text).not.toContain("malformed line");
+		// The scenario continues after the dropped line's newline and settles.
+		expect(res.text).toContain("last thing pi said:\nFINAL ANSWER");
+		expect(res.text).toMatch(/\[session: [0-9a-f-]{36}\]/);
 	});
 });
 

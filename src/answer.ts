@@ -337,12 +337,21 @@ export function renderFailure(
 ): string {
 	// How it ended matters to the reader: an aborted turn closed itself and its
 	// events arrived, a signalled one was cut off and may be missing its tail.
+	// An unverifiable group outranks them all — the cancel or timeout did not
+	// cleanly happen, and the session is not safe to continue yet.
 	const ending = result.endedBy === "abort" ? "the turn was aborted" : "the process was killed";
-	const reason = result.cancelled
-		? `cancelled by the client; ${ending}`
-		: result.timedOut
-			? `timed out${session.timeoutMs === undefined ? "" : ` after ${session.timeoutMs} ms`}; ${ending}`
-			: `exited with code ${result.code}`;
+	const reason =
+		result.cleanupUnverified === true
+			? "the turn ended but its process group could not be confirmed empty; leftover processes may still be running"
+			: result.corruptLines !== undefined
+				? `emitted ${result.corruptLines} malformed line${result.corruptLines === 1 ? "" : "s"} on its protocol stdout; the event stream contract was violated`
+				: result.droppedLines !== undefined
+					? `dropped ${result.droppedLines} line${result.droppedLines === 1 ? "" : "s"} longer than the capture limit without reading ${result.droppedLines === 1 ? "it" : "them"}; the event stream contract was violated`
+					: result.cancelled
+						? `cancelled by the client; ${ending}`
+						: result.timedOut
+							? `timed out${session.timeoutMs === undefined ? "" : ` after ${session.timeoutMs} ms`}; ${ending}`
+							: `exited with code ${result.code}`;
 
 	const parts = [`[session: ${session.id}]`, `[error: pi ${reason}]`];
 
@@ -359,12 +368,22 @@ export function renderFailure(
 	parts.push(`progress before it died:\n${summarize(acc, elapsedMs)}`);
 
 	// The whole point of keeping the id: the work is not lost, it is parked.
-	parts.push(
-		`The session is intact and resumable — pi still has every turn above.\n` +
-			`To continue where it stopped:\n` +
-			`  pi_reply({ session: "${session.id}", prompt: "..." })\n` +
-			`Raise the limit for the next leg with timeout_ms if the task needs longer.`,
-	);
+	// With an unverifiable group it is parked harder — follow-ups are refused
+	// until the leftovers are confirmed gone, so saying "just pi_reply" would
+	// invite exactly the second turn the block exists to prevent.
+	if (result.cleanupUnverified === true) {
+		parts.push(
+			"This session is blocked until the leftover pi processes are confirmed gone; " +
+				"pi_reply and pi_start are refused in the meantime. Retry later.",
+		);
+	} else {
+		parts.push(
+			`The session is intact and resumable — pi still has every turn above.\n` +
+				`To continue where it stopped:\n` +
+				`  pi_reply({ session: "${session.id}", prompt: "..." })\n` +
+				`Raise the limit for the next leg with timeout_ms if the task needs longer.`,
+		);
+	}
 
 	const err = tailStderr(result.stderr);
 	if (err) parts.push(`stderr:\n${err}`);

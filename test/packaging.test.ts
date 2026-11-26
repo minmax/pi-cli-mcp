@@ -11,9 +11,12 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const srcDir = join(root, "src");
 
 function sourceFiles(): string[] {
-	return readdirSync(srcDir)
-		.filter((name) => name.endsWith(".ts"))
-		.map((name) => join(srcDir, name));
+	const walk = (dir: string): string[] =>
+		readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+			const path = join(dir, entry.name);
+			return entry.isDirectory() ? walk(path) : entry.name.endsWith(".ts") ? [path] : [];
+		});
+	return walk(srcDir);
 }
 
 describe("runtime dependencies", () => {

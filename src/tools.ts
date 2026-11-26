@@ -13,6 +13,7 @@ import {
 	summarize,
 	tailStderr,
 } from "./answer.ts";
+import { quarantineSession, releaseQuarantine, sessionQuarantine } from "./async/quarantine.ts";
 import { DEFAULT_MODEL, DEFAULT_THINKING, MAX_PROMPT, MAX_TIMEOUT_MS, TIMEOUT_MS } from "./config.ts";
 import type { RunResult } from "./pi-process.ts";
 import { runPi, withSlot } from "./pi-process.ts";
@@ -229,7 +230,7 @@ export function toolResult(text: string, isError = false): ToolResult {
 	return { content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) };
 }
 
-function resolveCwd(requested: unknown): string {
+export function resolveCwd(requested: unknown): string {
 	if (requested === undefined || requested === null || requested === "") return process.cwd();
 	if (typeof requested !== "string") throw new Error("cwd must be a string");
 	if (!requested.startsWith("/")) throw new Error(`cwd must be an absolute path: ${requested}`);
@@ -239,7 +240,7 @@ function resolveCwd(requested: unknown): string {
 	return requested;
 }
 
-function readTimeout(value: unknown): number | undefined {
+export function readTimeout(value: unknown): number | undefined {
 	if (value === undefined || value === null) return undefined;
 	if (typeof value !== "number" || !Number.isFinite(value) || value < 1000) {
 		throw new Error("timeout_ms must be a number of milliseconds, at least 1000");
@@ -250,7 +251,7 @@ function readTimeout(value: unknown): number | undefined {
 	return value;
 }
 
-function readOverrides(input: Record<string, unknown>): RunOverrides {
+export function readOverrides(input: Record<string, unknown>): RunOverrides {
 	const overrides: RunOverrides = {};
 	const model = input.model ?? DEFAULT_MODEL;
 	if (model !== undefined && model !== null) {
@@ -279,7 +280,7 @@ function readOverrides(input: Record<string, unknown>): RunOverrides {
 	return overrides;
 }
 
-function readPrompt(value: unknown, tool: string): string {
+export function readPrompt(value: unknown, tool: string): string {
 	if (typeof value !== "string" || value.trim() === "") {
 		throw new Error(`${tool}: \`prompt\` is required and must be a non-empty string.`);
 	}
@@ -298,10 +299,17 @@ interface Outcome {
 	elapsedMs: number;
 }
 
-async function invokePi(transport: Transport, plan: RunPlan, ctx: CallContext): Promise<Outcome> {
+/** Shared turn invocation: drives one transport run and returns the structured outcome. */
+export async function invokePi(
+	transport: Transport,
+	plan: RunPlan,
+	ctx: CallContext,
+	onRawEvent?: (event: unknown) => void,
+): Promise<Outcome> {
 	const acc = newAccumulator();
 	const started = Date.now();
 	const result = await transport.run(plan, ctx, (event) => {
+		onRawEvent?.(event);
 		const note = accumulate(acc, event);
 		if (note && ctx.progress) ctx.progress(note);
 	});
@@ -364,6 +372,33 @@ function renderSuccess(outcome: Outcome, prefix: string | null): ToolResult {
 
 // --- tools ----------------------------------------------------------------
 
+/** Run one turn under the session lane with the quarantine invariant: the
+ * block is set before the lane is released, and a follow-up that queued for
+ * the lane rechecks under it (and under the process slot) before it may
+ * spawn. Returns null when the session is quarantined — nothing launches, and
+ * the caller reports the blocked session. */
+async function runTurnWithQuarantine(
+	sessionId: string,
+	transport: Transport,
+	plan: RunPlan,
+	runCtx: CallContext,
+): Promise<Awaited<ReturnType<typeof invokePi>> | null> {
+	return withSessionLock(sessionId, () =>
+		withSlot(async () => {
+			// Recheck here, not only at the door: a turn that ended unverified
+			// while this call waited set the quarantine before releasing the
+			// lane, so this call must refuse rather than spawn beside the
+			// leftover the sweep has not confirmed gone.
+			if (sessionQuarantine(sessionId) !== undefined) return null;
+			const run = await invokePi(transport, plan, runCtx);
+			// Set before the lane is released: a follow-up must never acquire a
+			// lane whose block has not landed yet.
+			if (run.result.cleanupUnverified === true) quarantineSession(sessionId, null);
+			return run;
+		}),
+	);
+}
+
 export async function callPi(input: Record<string, unknown>, ctx: CallContext): Promise<ToolResult> {
 	let prompt: string;
 	let cwd: string;
@@ -388,12 +423,37 @@ export async function callPi(input: Record<string, unknown>, ctx: CallContext): 
 	rememberSession(sessionId, cwd, { model: overrides.model, thinking: overrides.thinking });
 
 	const plan: RunPlan = { cwd, sessionId, prompt, overrides, timeoutMs: timeoutMs ?? TIMEOUT_MS };
-	const outcome = await withSlot(() => invokePi(transport, plan, ctx));
+	// The same per-session lane pi_reply and async turns use, taken on the
+	// session this call owns. A fresh UUID makes the lane uncontended today,
+	// but the invariant is structural: exactly one turn per session across
+	// every path, and the overlap detector in the fake can never fire.
+	// The tree-gone callback is the quarantine lift if this run ends with an
+	// unverifiable group; on a clean run it fires early and is a no-op.
+	const runCtx: CallContext = { ...ctx, onTreeGone: () => releaseQuarantine(sessionId, null) };
+	const outcome = await runTurnWithQuarantine(sessionId, transport, plan, runCtx);
+	if (outcome === null) {
+		return toolResult(
+			"pi: this session is blocked — its previous pi turn ended with a process group that could not " +
+				"be confirmed empty; retry once the leftover processes are confirmed gone.",
+			true,
+		);
+	}
 
 	// A turn ended by abort exits cleanly, so the exit code alone would report a
 	// timed-out or cancelled run as a normal answer. The flags are what say the
-	// run was ended from outside rather than finished.
-	if (outcome.result.code !== 0 || outcome.result.timedOut || outcome.result.cancelled) {
+	// run was ended from outside rather than finished. A run whose group could
+	// not be confirmed empty is a failure too, and its session is blocked until
+	// the sweep proves the leftovers are gone — otherwise a follow-up could run
+	// beside whatever survived.
+	const unverified = outcome.result.cleanupUnverified === true;
+	const streamViolated = outcome.result.corruptLines !== undefined || outcome.result.droppedLines !== undefined;
+	if (
+		outcome.result.code !== 0 ||
+		outcome.result.timedOut ||
+		outcome.result.cancelled ||
+		unverified ||
+		streamViolated
+	) {
 		return toolResult(
 			renderFailure(outcome.acc, outcome.result, outcome.elapsedMs, {
 				id: sessionId,
@@ -414,6 +474,15 @@ export async function callPiReply(input: Record<string, unknown>, ctx: CallConte
 	}
 
 	const known = getSession(session);
+	// A quarantined session's previous turn left an unverified process group;
+	// refuse the follow-up until the sweep confirms the leftovers are gone.
+	if (sessionQuarantine(session) !== undefined) {
+		return toolResult(
+			"pi_reply: this session is blocked — its previous pi turn ended with a process group that could not " +
+				"be confirmed empty; retry once the leftover processes are confirmed gone.",
+			true,
+		);
+	}
 	let prompt: string;
 	let cwd: string;
 	let overrides: RunOverrides;
@@ -434,12 +503,31 @@ export async function callPiReply(input: Record<string, unknown>, ctx: CallConte
 	}
 
 	const plan: RunPlan = { cwd, sessionId: session, prompt, overrides, timeoutMs: timeoutMs ?? TIMEOUT_MS };
-	const outcome = await withSessionLock(session, () => withSlot(() => invokePi(transport, plan, ctx)));
+	const runCtx: CallContext = { ...ctx, onTreeGone: () => releaseQuarantine(session, null) };
+	const outcome = await runTurnWithQuarantine(session, transport, plan, runCtx);
+	if (outcome === null) {
+		return toolResult(
+			"pi_reply: this session is blocked — its previous pi turn ended with a process group that could not " +
+				"be confirmed empty; retry once the leftover processes are confirmed gone.",
+			true,
+		);
+	}
 
 	// A turn ended by abort exits cleanly, so the exit code alone would report a
 	// timed-out or cancelled run as a normal answer. The flags are what say the
-	// run was ended from outside rather than finished.
-	if (outcome.result.code !== 0 || outcome.result.timedOut || outcome.result.cancelled) {
+	// run was ended from outside rather than finished. A run whose group could
+	// not be confirmed empty is a failure too, and its session is blocked until
+	// the sweep proves the leftovers are gone — otherwise a follow-up could run
+	// beside whatever survived.
+	const unverified = outcome.result.cleanupUnverified === true;
+	const streamViolated = outcome.result.corruptLines !== undefined || outcome.result.droppedLines !== undefined;
+	if (
+		outcome.result.code !== 0 ||
+		outcome.result.timedOut ||
+		outcome.result.cancelled ||
+		unverified ||
+		streamViolated
+	) {
 		// Keep the session current even on failure: the conversation on disk grew,
 		// and the next attempt should resume in the same place.
 		rememberSession(session, cwd, {});

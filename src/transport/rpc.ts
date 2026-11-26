@@ -8,12 +8,23 @@
 // While the turn runs it is registered as live, so a caller can send a message
 // into it. Sending is always the caller's decision — nothing is sent from here.
 
+import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
+import { asRecord } from "../parse.ts";
 import type { PiHandle, RunResult } from "../pi-process.ts";
 import { runPi } from "../pi-process.ts";
 import type { CallContext } from "../types.ts";
 import { overrideArgs } from "./args.ts";
 import { registerRun } from "./registry.ts";
 import type { RunPlan, Transport } from "./types.ts";
+
+// One initial command per child; correlate only its response, not a later
+// command from pi_send. A missing acknowledgement does not prove non-execution.
+const PROMPT_ACK = {
+	id: "pi-mcp-initial-prompt",
+	type: "response",
+	command: "prompt",
+	success: true,
+} as const satisfies Pick<RpcResponse, "id" | "type" | "command" | "success">;
 
 export const rpcTransport: Transport = {
 	name: "rpc",
@@ -27,6 +38,7 @@ export const rpcTransport: Transport = {
 		let handle: PiHandle | undefined;
 		let unregister = (): void => {};
 		let settled = false;
+		let rpcPromptAcknowledged = false;
 
 		return runPi(args, plan.cwd, {
 			token: ctx.token,
@@ -40,6 +52,7 @@ export const rpcTransport: Transport = {
 			gracefulStop: () => {
 				handle?.send({ type: "abort" });
 			},
+			onTreeGone: ctx.onTreeGone,
 			onStart: (piHandle) => {
 				handle = piHandle;
 				unregister = registerRun({
@@ -48,9 +61,17 @@ export const rpcTransport: Transport = {
 					startedAt: Date.now(),
 					handle: piHandle,
 				});
-				piHandle.send({ type: "prompt", message: plan.prompt });
+				piHandle.send({ id: PROMPT_ACK.id, type: "prompt", message: plan.prompt } satisfies RpcCommand);
 			},
 			onEvent: (event) => {
+				if (!rpcPromptAcknowledged) {
+					const response = asRecord(event);
+					rpcPromptAcknowledged =
+						response?.id === PROMPT_ACK.id &&
+						response.type === PROMPT_ACK.type &&
+						response.command === PROMPT_ACK.command &&
+						response.success === PROMPT_ACK.success;
+				}
 				onEvent(event);
 				// `agent_settled` is pi's end-of-turn marker. Closing stdin is how its
 				// rpc mode is asked to exit; without it the process would sit idle
@@ -61,9 +82,9 @@ export const rpcTransport: Transport = {
 					handle?.endInput();
 				}
 			},
-		}).finally(() => {
-			unregister();
-		});
+		})
+			.then((result) => ({ ...result, rpcPromptAcknowledged }))
+			.finally(() => unregister());
 	},
 };
 
