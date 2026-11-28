@@ -84,6 +84,8 @@ export interface ToolTextContent {
 
 export interface ToolResult {
 	content: ToolTextContent[];
+	/** Machine-readable payload, mirrored as JSON text for clients that drop it. */
+	structuredContent?: Record<string, unknown>;
 	isError?: boolean;
 }
 
@@ -120,6 +122,15 @@ export interface CancelToken {
 export interface CallContext {
 	token: CancelToken;
 	progress?: (message: string) => void;
+	/** The request id exactly as it arrived — the server echoes it back
+	 * verbatim, so byte budgets that include the reply frame must charge the
+	 * real bytes, not a placeholder. */
+	replyId?: JsonRpcId;
+	/** Fired when this run's pi process group is confirmed empty — for a
+	 * fail-closed run, only after the result was already delivered marked
+	 * `cleanupUnverified`. Set by callers that block the session on that
+	 * outcome; the runner is done and cannot call back itself. */
+	onTreeGone?: () => void;
 }
 
 // --- run configuration ----------------------------------------------------

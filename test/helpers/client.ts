@@ -39,13 +39,15 @@ export class Client {
 	readonly child: ChildProcessWithoutNullStreams;
 	readonly notifications: JsonRpcResponse[] = [];
 	private readonly pending = new Map<number, (msg: JsonRpcResponse) => void>();
+	private readonly pendingStringIds = new Map<string, (msg: JsonRpcResponse) => void>();
 	private buffer = "";
 	private nextId = 1;
 
 	constructor(env: Record<string, string> = {}, cwd: string = process.cwd()) {
 		this.child = spawn(process.execPath, [...NODE_TS_FLAGS, SERVER], {
 			cwd,
-			env: { ...process.env, ...env },
+			// Async is explicitly opt-in per test. Node omits undefined env values.
+			env: { ...process.env, PI_MCP_ASYNC_STATE_DIR: undefined, ...env },
 			stdio: ["pipe", "pipe", "pipe"],
 		}) as ChildProcessWithoutNullStreams;
 		this.child.stdout.setEncoding("utf8");
@@ -61,9 +63,17 @@ export class Client {
 			newline = this.buffer.indexOf("\n");
 			if (!line) continue;
 			const msg = JSON.parse(line) as JsonRpcResponse;
-			const resolver = typeof msg.id === "number" ? this.pending.get(msg.id) : undefined;
-			if (resolver) {
-				this.pending.delete(msg.id as number);
+			const resolver =
+				typeof msg.id === "number"
+					? this.pending.get(msg.id)
+					: typeof msg.id === "string"
+						? this.pendingStringIds.get(msg.id)
+						: undefined;
+			if (typeof msg.id === "number" && resolver) {
+				this.pending.delete(msg.id);
+				resolver(msg);
+			} else if (typeof msg.id === "string" && resolver) {
+				this.pendingStringIds.delete(msg.id);
 				resolver(msg);
 			} else {
 				// Notifications, plus protocol errors that carry id: null.
@@ -108,11 +118,28 @@ export class Client {
 		return init;
 	}
 
-	async tool(name: string, args: unknown = {}, meta?: unknown): Promise<{ text: string; isError: boolean }> {
+	async tool(
+		name: string,
+		args: unknown = {},
+		meta?: unknown,
+	): Promise<{ text: string; isError: boolean; structured: any }> {
 		const params: Record<string, unknown> = { name, arguments: args };
 		if (meta !== undefined) params._meta = meta;
 		const res = await this.call("tools/call", params);
-		return { text: res.result?.content?.[0]?.text ?? "", isError: res.result?.isError === true };
+		return {
+			text: res.result?.content?.[0]?.text ?? "",
+			isError: res.result?.isError === true,
+			structured: res.result?.structuredContent,
+		};
+	}
+
+	/** tools/call under a caller-chosen string id. JSON-RPC allows them, the
+	 * server echoes them verbatim, and byte-budget tests must charge the real
+	 * echoed bytes. */
+	async toolWithId(id: string, name: string, args: unknown = {}): Promise<JsonRpcResponse> {
+		const promise = new Promise<JsonRpcResponse>((resolve) => this.pendingStringIds.set(id, resolve));
+		this.send({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+		return promise;
 	}
 
 	progressNotes(): string[] {
@@ -164,12 +191,12 @@ export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
  */
 export async function waitFor(
 	label: string,
-	predicate: () => boolean,
+	predicate: () => boolean | Promise<boolean>,
 	{ timeoutMs = 10_000, everyMs = 50 }: { timeoutMs?: number; everyMs?: number } = {},
 ): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
-		if (predicate()) return;
+		if (await predicate()) return;
 		await sleep(everyMs);
 	}
 	throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`);

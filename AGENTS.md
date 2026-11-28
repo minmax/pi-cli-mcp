@@ -10,6 +10,14 @@ release, validate, test, or touch pi's contract is in
 automatic messages, no injected instructions, no git or filesystem logic layered on top. If a
 behaviour would surprise someone reading pi's own docs, it does not belong here.
 
+**Two narrow opt-in exceptions, neither automatic.** `PI_MCP_ASYNC_STATE_DIR` lets the supervisor
+own durable execution state for work a caller explicitly started — `pi_start`, `pi_status`,
+`pi_wait`, `pi_result`, `pi_cancel` — with cleanup verified before a session lane frees. And
+`PI_MCP_COMPLETION_HOOK` names an operator-owned executable the server invokes at most once, best-effort, after a durable terminal transition. Neither exception admits automatic Pi messages,
+adapter-initiated notifications, or delivery logic of our own: `pi_send` still fires only when a
+caller asks, the hook still sends nothing itself, and both stay off unless an operator turns them
+on.
+
 **Zero runtime dependencies.** pi's packages are devDependencies reached only through `import type`.
 Adding a runtime import is a design change, not a convenience.
 

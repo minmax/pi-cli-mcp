@@ -218,3 +218,70 @@ describe("reaching a running turn", () => {
 		expect(noMessage.text).toContain("`message` is required");
 	});
 });
+
+describe("PI_MCP_EXTRA_ARGS", () => {
+	// Operator-owned tokens, probe flag last and bare: the motivating case is a
+	// boolean extension flag, whose neighbour must never be the prompt positional
+	// (pi takes the next non-flag token as an unknown flag’s value and drops it).
+	const EXTRA = "--fake-extra with-value,--fake-probe-argv";
+	const readArgv = (text: string): string[] => {
+		// The response opens with a `[session: <id>]` line; the probe answer is the
+		// line that starts as a JSON array of strings.
+		const line = text.split("\n").find((l) => l.startsWith(`["`)) ?? "[]";
+		return JSON.parse(line);
+	};
+
+	it("places the operator’s tokens before --mode on a print spawn, prompt last", async () => {
+		const client = new Client({ ...ws.env, PI_MCP_EXTRA_ARGS: EXTRA }, ws.dir);
+		await client.handshake();
+		const res = await client.tool("pi", { prompt: "go", cwd: ws.dir, transport: "print" });
+		client.close();
+		expect(res.isError).toBe(false);
+		const argv = readArgv(res.text);
+		const i = argv.indexOf("--fake-probe-argv");
+		expect(argv[i - 2]).toBe("--fake-extra");
+		expect(argv[i - 1]).toBe("with-value");
+		// Straight after -p: an unknown flag there is followed by --mode, a flag
+		// pi knows, so it can never take the prompt as its value.
+		expect(argv[argv.indexOf("-p") + 1]).toBe("--fake-extra");
+		expect(argv.indexOf("--fake-probe-argv")).toBeLessThan(argv.indexOf("--mode"));
+		// The prompt is the positional argument; operator flags must not
+		// displace it from the end of the line.
+		expect(argv.at(-1)).toBe("go");
+	});
+
+	it("appends them to an rpc spawn after every other flag", async () => {
+		const client = new Client({ ...ws.env, PI_MCP_EXTRA_ARGS: EXTRA }, ws.dir);
+		await client.handshake();
+		// A model override proves the tail sits after the per-call flags too.
+		const res = await client.tool("pi", {
+			prompt: "go",
+			cwd: ws.dir,
+			transport: "rpc",
+			model: "fake/alpha",
+		});
+		client.close();
+		expect(res.isError).toBe(false);
+		const argv = readArgv(res.text);
+		expect(argv).toContain("rpc");
+		expect(argv).toContain("--session-id");
+		expect(argv).toContain("--model");
+		expect(argv.indexOf("--fake-probe-argv")).toBeGreaterThan(argv.indexOf("--model"));
+		// The tail is last on the line: nothing follows it in rpc mode.
+		expect(argv.slice(-3)).toEqual(["--fake-extra", "with-value", "--fake-probe-argv"]);
+	});
+
+	it("keeps the search adjacent to --list-models and takes the tail after it", async () => {
+		const client = new Client({ ...ws.env, PI_MCP_EXTRA_ARGS: EXTRA }, ws.dir);
+		await client.handshake();
+		const res = await client.tool("pi_models", { search: "beta" });
+		client.close();
+		expect(res.isError).toBe(false);
+		expect(res.text).toContain("fake/beta");
+		expect(res.text).not.toContain("fake/alpha");
+		// The models branch answers with the table; its last line is the probe.
+		const argv = readArgv(res.text);
+		expect(argv.indexOf("beta")).toBe(argv.indexOf("--list-models") + 1);
+		expect(argv.indexOf("--fake-probe-argv")).toBeGreaterThan(argv.indexOf("--list-models"));
+	});
+});
