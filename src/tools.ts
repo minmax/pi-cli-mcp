@@ -14,7 +14,7 @@ import {
 	tailStderr,
 } from "./answer.ts";
 import { quarantineSession, releaseQuarantine, sessionQuarantine } from "./async/quarantine.ts";
-import { DEFAULT_MODEL, DEFAULT_THINKING, MAX_PROMPT, MAX_TIMEOUT_MS, TIMEOUT_MS } from "./config.ts";
+import { DEFAULT_MODEL, DEFAULT_THINKING, EXTRA_ARGS, MAX_PROMPT, MAX_TIMEOUT_MS, TIMEOUT_MS } from "./config.ts";
 import type { RunResult } from "./pi-process.ts";
 import { runPi, withSlot } from "./pi-process.ts";
 import { getSession, listSessions, rememberSession, withSessionLock } from "./sessions.ts";
@@ -561,7 +561,7 @@ export async function callPiModels(input: Record<string, unknown>, ctx: CallCont
 	if (search !== undefined && typeof search !== "string") {
 		return toolResult("pi_models: `search` must be a string.", true);
 	}
-	const args = ["--list-models", ...(search ? [search] : [])];
+	const args = ["--list-models", ...(search ? [search] : []), ...EXTRA_ARGS];
 	const result = await withSlot(() => runPi(args, process.cwd(), { token: ctx.token }));
 	if (result.cancelled) return toolResult("pi_models was cancelled.", true);
 	if (result.code !== 0) {

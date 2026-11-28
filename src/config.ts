@@ -96,6 +96,19 @@ export const DEFAULT_MODEL = process.env.PI_MCP_MODEL ?? null;
 export const DEFAULT_THINKING = process.env.PI_MCP_THINKING ?? null;
 
 /**
+ * Operator-owned argv tokens, prepended to every pi spawn — the place for a
+ * flag no tool input reaches (e.g. one an operator needs to widen a permission
+ * extension's rpc behaviour). Comma- or space-separated, so a token may not
+ * itself contain either. Tokens are passed verbatim: one that is not a flag,
+ * or repeats a flag the server sets (e.g. --mode), is parsed by pi its own
+ * way — and pi's error text for a bad token reaches the caller, fail closed.
+ * Off unless set; callers cannot set it.
+ */
+export const EXTRA_ARGS: readonly string[] = (process.env.PI_MCP_EXTRA_ARGS ?? "")
+	.split(/[\s,]+/)
+	.filter((token) => token !== "");
+
+/**
  * Which way to drive pi when a call does not say.
  *
  * `rpc` by default: it is a superset of what `print` can do. Same event stream,

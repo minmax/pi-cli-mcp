@@ -476,6 +476,7 @@ wrong shape never sends anything.
 | `PI_MCP_STATE` | `~/.local/state/pi-mcp/sessions.json` | Session → cwd map. |
 | `PI_MCP_WRAP` | unset | Command prefix, e.g. `sandbox-exec -f profile.sb`. |
 | `PI_MCP_TRANSPORT` | `rpc` | Default transport: `rpc` or `print`. |
+| `PI_MCP_EXTRA_ARGS` | unset | Extra argv tokens for every pi process, comma- or space-separated (e.g. `"--verbose --<extension-flag>"`). Operator opt-in; callers cannot set it. A token may not itself contain a comma or space; tokens are passed verbatim, so a non-flag token or a repeat of a flag the server sets (e.g. `--mode`) is parsed by pi its own way, and pi’s error for a bad token reaches the caller. |
 | `PI_MCP_ASYNC_STATE_DIR` | unset | Absolute path; set to enable `pi_start`/`pi_status`/`pi_wait`/`pi_result`/`pi_cancel`. Private durable store, `0700`. |
 | `PI_MCP_ASYNC_MAX_QUEUED` | `32` | Pending async executions across all sessions. |
 | `PI_MCP_ASYNC_MAX_QUEUED_PER_SESSION` | `8` | Pending async executions per session. |

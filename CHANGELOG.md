@@ -49,6 +49,14 @@ operator who sets none of the variables below.
   idempotency-key miss only, so an identical retry still finds its execution after the directory
   disappears.
 
+- **Operator extra args.** `PI_MCP_EXTRA_ARGS` is an operator-owned argv tail for every
+  pi process the server spawns: comma- or space-separated tokens — a token may not itself contain
+  a comma or space — placed where the spawn’s own flags cannot be misparsed (straight after `-p`
+  in print mode, last in rpc, after the search in `pi_models`). The place for a flag no tool input
+  reaches — e.g. widening a permission extension whose rpc-mode behaviour blocks work — without
+  reopening the tool schema to callers. Callers cannot set it; pi’s own error for a bad token
+  still reaches them, fail closed. Unset (the default) changes nothing.
+
 ## 0.7.1 — 2026-09-08
 
 - Every tool declares MCP `annotations` — `readOnlyHint`, `destructiveHint`, `idempotentHint`,

@@ -26,6 +26,8 @@
 //   FAKE_GARBAGE_SIZE       its size in chars (default 110000)
 //   FAKE_GARBAGE_COMPLETE_SPLIT=1  its newline travels in a second flush, after the head
 //   FAKE_MODE=no_newline   last event is EOF-terminated, not newline-terminated
+//   --fake-probe-argv      any mode: the answer (or a line after the models
+//                          table) becomes the argv this process actually received
 //   FAKE_MODE=overlap      detects concurrent runs on one session via a lockfile
 //   FAKE_STOP=<reason>     stopReason on the final message (default "stop")
 //   FAKE_EXIT=<code>       exit code (default 0)
@@ -146,7 +148,10 @@ if (process.argv.includes("rpc")) {
 	];
 	const kept =
 		filter && !filter.startsWith("-") ? [rows[0], ...rows.slice(1).filter((r) => r.includes(filter))] : rows;
-	process.stdout.write(`${kept.join("\n")}\n`);
+	// The argv probe again, as a line after the table, so a test can prove the
+	// operator’s extra tokens reached this spawn too.
+	const probe = process.argv.includes("--fake-probe-argv") ? `${JSON.stringify(process.argv)}\n` : "";
+	process.stdout.write(`${kept.join("\n")}\n${probe}`);
 	process.exitCode = exitCode;
 } else {
 	await runAgent();
@@ -417,7 +422,10 @@ async function runScenario() {
 	// it must still parse once the dropped line is behind the reader.
 	const finishScenario = () => {
 		out({ type: "turn_start" });
-		finalMessage("FINAL ANSWER");
+		// --fake-probe-argv arrives as an operator flag via PI_MCP_EXTRA_ARGS; the
+		// answer becomes the argv pi actually received, so a test can prove the
+		// server's flag assembly without reading it from the source.
+		finalMessage(process.argv.includes("--fake-probe-argv") ? JSON.stringify(process.argv) : "FINAL ANSWER");
 		out({ type: "agent_end", willRetry: false });
 		out({ type: "agent_settled" });
 		// Print mode exits by falling off the end here: the tail lands as the last
@@ -434,14 +442,14 @@ async function runScenario() {
 			// still parse the valid lines that follow.
 			process.stdout.write("x".repeat(size - 10), () => {
 				setTimeout(() => {
-					process.stdout.write("x".repeat(10) + "\n", finishScenario);
+					process.stdout.write(`${"x".repeat(10)}\n`, finishScenario);
 				}, 0);
 			});
 			return;
 		}
 		// One complete over-long line, newline included: the capture limit
 		// applies before parsing, not only to unterminated leftovers.
-		process.stdout.write("x".repeat(size) + "\n");
+		process.stdout.write(`${"x".repeat(size)}\n`);
 	}
 	finishScenario();
 }

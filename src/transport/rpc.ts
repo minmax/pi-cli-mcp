@@ -9,6 +9,7 @@
 // into it. Sending is always the caller's decision — nothing is sent from here.
 
 import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
+import { EXTRA_ARGS } from "../config.ts";
 import { asRecord } from "../parse.ts";
 import type { PiHandle, RunResult } from "../pi-process.ts";
 import { runPi } from "../pi-process.ts";
@@ -33,7 +34,7 @@ export const rpcTransport: Transport = {
 	async run(plan: RunPlan, ctx: CallContext, onEvent: (event: unknown) => void): Promise<RunResult> {
 		// The prompt travels inside a command, so neither argv size nor a leading
 		// dash is a problem here — no temp file needed.
-		const args = ["--mode", "rpc", "--session-id", plan.sessionId, ...overrideArgs(plan.overrides)];
+		const args = ["--mode", "rpc", "--session-id", plan.sessionId, ...overrideArgs(plan.overrides), ...EXTRA_ARGS];
 
 		let handle: PiHandle | undefined;
 		let unregister = (): void => {};
